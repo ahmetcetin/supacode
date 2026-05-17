@@ -9,12 +9,18 @@ struct SidebarListView: View {
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
   @FocusState private var isSidebarFocused: Bool
+  @Environment(CommandKeyObserver.self) private var commandKeyObserver
+  @Shared(.settingsFile) private var settingsFile
+  /// Read here purely so SwiftUI re-runs the body (and fires the `.onChange`
+  /// below) when the menu writes a new value. The structure compute itself
+  /// reads the toggles via local `@Shared` inside the reducer.
+  @Shared(.sidebarGroupPinnedRows) private var groupPinnedRows: Bool
+  @Shared(.sidebarGroupActiveRows) private var groupActiveRows: Bool
+  @Shared(.sidebarNestWorktreesByBranch) private var nestWorktreesByBranch: Bool
 
   var body: some View {
     let state = store.state
-    let expandedRepoIDs = state.expandedRepositoryIDs
-    let hotkeyIDs = state.orderedSidebarItemIDs(includingRepositoryIDs: expandedRepoIDs)
-    let orderedRoots = state.orderedRepositoryRoots()
+    let structure = state.sidebarStructure
     let selectedWorktreeIDs = state.sidebarSelectedWorktreeIDs
     let currentSelections = state.sidebarSelections
     let selection = Binding<Set<SidebarSelection>>(
@@ -24,49 +30,54 @@ struct SidebarListView: View {
         store.send(.selectionChanged(newValue))
       }
     )
-    let repositoriesByID = Dictionary(uniqueKeysWithValues: store.repositories.map { ($0.id, $0) })
     let pendingSidebarReveal = state.pendingSidebarReveal
+
+    // The only legal view-side computation: a trivial join from the
+    // reducer-derived `slotByID` against the Cmd state + shortcut overrides.
+    // Gated on `isPressed` so the dict is empty when no hints are visible.
+    let shortcutHintByID: [Worktree.ID: String]
+    if commandKeyObserver.isPressed {
+      let overrides = settingsFile.global.shortcutOverrides
+      shortcutHintByID = structure.slotByID.compactMapValues { index in
+        AppShortcuts.worktreeSelectionShortcutDisplay(atSlot: index, overrides: overrides)
+      }
+    } else {
+      shortcutHintByID = [:]
+    }
 
     return ScrollViewReader { scrollProxy in
       List(selection: selection) {
-        if !state.isInitialLoadComplete, store.repositories.isEmpty {
-          SidebarPlaceholderView()
-        } else if orderedRoots.isEmpty {
-          ForEach(store.repositories) { repository in
-            SidebarRootView(
-              repository: repository,
-              hotkeyIDs: hotkeyIDs,
-              selectedWorktreeIDs: selectedWorktreeIDs,
-              store: store,
-              terminalManager: terminalManager
-            )
-          }
-        } else {
-          ForEach(sidebarRootRows(from: orderedRoots), id: \.repositoryID) { row in
-            if let failureMessage = state.loadFailuresByID[row.repositoryID] {
-              SidebarFailedRepositoryRow(
-                rootURL: row.rootURL,
-                failureMessage: failureMessage,
-                store: store
-              )
-            } else if let repository = repositoriesByID[row.repositoryID] {
-              SidebarRootView(
-                repository: repository,
-                hotkeyIDs: hotkeyIDs,
-                selectedWorktreeIDs: selectedWorktreeIDs,
-                store: store,
-                terminalManager: terminalManager
-              )
-            }
-          }
-          .onMove { offsets, destination in
-            store.send(.repositoriesMoved(offsets, destination))
-          }
+        ForEach(structure.sections) { section in
+          SidebarSectionDispatcher(
+            section: section,
+            structure: structure,
+            shortcutHintByID: shortcutHintByID,
+            selectedWorktreeIDs: selectedWorktreeIDs,
+            store: store,
+            terminalManager: terminalManager
+          )
+        }
+        .onMove { offsets, destination in
+          handleRepositoryMove(
+            offsets: offsets,
+            destination: destination,
+            structure: structure
+          )
         }
       }
       .listStyle(.sidebar)
       .focused($isSidebarFocused)
       .frame(minWidth: 220)
+      .focusedSceneValue(\.visibleHotkeyWorktreeRows, structure.hotkeySlots)
+      .onChange(of: groupPinnedRows, initial: false) { _, _ in
+        store.send(.sidebarGroupingTogglesChanged)
+      }
+      .onChange(of: groupActiveRows, initial: false) { _, _ in
+        store.send(.sidebarGroupingTogglesChanged)
+      }
+      .onChange(of: nestWorktreesByBranch, initial: false) { _, _ in
+        store.send(.sidebarNestByBranchChanged)
+      }
       .dropDestination(for: URL.self) { urls, _ in
         let fileURLs = urls.filter(\.isFileURL)
         guard !fileURLs.isEmpty else { return false }
@@ -108,15 +119,54 @@ struct SidebarListView: View {
     }
   }
 
-  private func sidebarRootRows(
-    from orderedRoots: [URL]
-  ) -> [(rootURL: URL, repositoryID: Repository.ID)] {
-    orderedRoots.map { rootURL in
-      (
-        rootURL: rootURL,
-        repositoryID: rootURL.standardizedFileURL.path(percentEncoded: false)
-      )
+  /// SwiftUI's `.onMove` reports offsets in the flat ForEach data array. The
+  /// structure exposes `reorderableRepositoryIDs` so we can translate a flat
+  /// move into the repository index space the `.repositoriesMoved` reducer
+  /// expects. Non-repo sections carry `.moveDisabled(true)` so they can't be
+  /// sources of a drag; the destination clamps below.
+  private func handleRepositoryMove(
+    offsets: IndexSet,
+    destination: Int,
+    structure: SidebarStructure
+  ) {
+    let repoIDs = structure.reorderableRepositoryIDs
+    guard !repoIDs.isEmpty else { return }
+    let sourceFlat = offsets.sorted()
+    let sectionsCount = structure.sections.count
+    // Map flat section indices to repo indices via SectionID matching. Skip
+    // any flat offset that doesn't correspond to a reorderable repo section.
+    var repoOffsets = IndexSet()
+    for index in sourceFlat where index < sectionsCount {
+      let section = structure.sections[index]
+      switch section {
+      case .repository(let repositoryID, _),
+        .folder(let repositoryID, _),
+        .failedRepository(let repositoryID, _, _):
+        if let repoIndex = repoIDs.firstIndex(of: repositoryID) {
+          repoOffsets.insert(repoIndex)
+        }
+      case .highlight, .placeholder:
+        continue
+      }
     }
+    guard !repoOffsets.isEmpty else { return }
+    let clampedDestination = min(max(destination, 0), sectionsCount)
+    let repoDestination: Int
+    if clampedDestination >= sectionsCount {
+      repoDestination = repoIDs.count
+    } else {
+      let section = structure.sections[clampedDestination]
+      switch section {
+      case .repository(let repositoryID, _),
+        .folder(let repositoryID, _),
+        .failedRepository(let repositoryID, _, _):
+        repoDestination = repoIDs.firstIndex(of: repositoryID) ?? repoIDs.count
+      case .highlight, .placeholder:
+        // Dropping above the highlight prefix collapses to "before the first repo".
+        repoDestination = 0
+      }
+    }
+    store.send(.repositoriesMoved(repoOffsets, repoDestination))
   }
 
   @MainActor
@@ -136,46 +186,75 @@ struct SidebarListView: View {
   }
 }
 
-private struct SidebarRootView: View {
-  let repository: Repository
-  let hotkeyIDs: [Worktree.ID]
+/// Single switch that turns one `SidebarStructure.Section` into the right
+/// SwiftUI view. The view has no other dispatch: the structure already
+/// answered "what kind of section, what rows, in what order".
+private struct SidebarSectionDispatcher: View {
+  let section: SidebarStructure.Section
+  let structure: SidebarStructure
+  let shortcutHintByID: [Worktree.ID: String]
   let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
 
   var body: some View {
-    if repository.isGitRepository {
-      SidebarSectionView(
-        repository: repository,
-        hotkeyIDs: hotkeyIDs,
-        selectedWorktreeIDs: selectedWorktreeIDs,
+    switch section {
+    case .placeholder:
+      SidebarPlaceholderView()
+        .moveDisabled(true)
+    case .highlight(let kind, let rowIDs):
+      SidebarHighlightSection(
+        kind: kind,
+        rowIDs: rowIDs,
         store: store,
-        terminalManager: terminalManager
+        terminalManager: terminalManager,
+        selectedWorktreeIDs: selectedWorktreeIDs,
+        repositoryHighlightByID: structure.repositoryHighlightByID,
+        shortcutHintByID: shortcutHintByID
       )
-    } else {
-      // Folder repos render a single flat row so the outer
-      // `ForEach(sidebarRootRows).onMove` can reorder them alongside
-      // git sections. `SidebarItemsView`'s nested
-      // ForEach-of-groups-of-rows would hide the folder from the
-      // outer `.onMove`, breaking sidebar-wide drag.
-      Section {
-        SidebarFolderRow(
+      .moveDisabled(true)
+    case .failedRepository(_, let rootURL, let failureMessage):
+      SidebarFailedRepositoryRow(
+        rootURL: rootURL,
+        failureMessage: failureMessage,
+        store: store
+      )
+    case .folder(let repositoryID, let rowID):
+      if let repository = store.state.repositories[id: repositoryID] {
+        // Empty header keeps `.listStyle(.sidebar)` from merging two
+        // consecutive folder repos visually.
+        Section {
+          SidebarFolderRow(
+            repository: repository,
+            rowID: rowID,
+            shortcutHint: shortcutHintByID[rowID],
+            selectedWorktreeIDs: selectedWorktreeIDs,
+            store: store,
+            terminalManager: terminalManager
+          )
+        } header: {
+          EmptyView()
+        }
+      }
+    case .repository(let repositoryID, let groups):
+      if let repository = store.state.repositories[id: repositoryID] {
+        SidebarGitRepositorySection(
           repository: repository,
-          hotkeyIDs: hotkeyIDs,
+          groups: groups,
+          shortcutHintByID: shortcutHintByID,
           selectedWorktreeIDs: selectedWorktreeIDs,
           store: store,
           terminalManager: terminalManager
         )
-      } header: {
-        EmptyView()
       }
     }
   }
 }
 
-private struct SidebarSectionView: View {
+private struct SidebarGitRepositorySection: View {
   let repository: Repository
-  let hotkeyIDs: [Worktree.ID]
+  let groups: [SidebarItemGroup]
+  let shortcutHintByID: [Worktree.ID: String]
   let selectedWorktreeIDs: Set<Worktree.ID>
   @Bindable var store: StoreOf<RepositoriesFeature>
   let terminalManager: WorktreeTerminalManager
@@ -185,7 +264,8 @@ private struct SidebarSectionView: View {
     Section(isExpanded: repositoryExpansionBinding) {
       SidebarItemsView(
         repository: repository,
-        hotkeyIDs: hotkeyIDs,
+        groups: groups,
+        shortcutHintByID: shortcutHintByID,
         selectedWorktreeIDs: selectedWorktreeIDs,
         store: store,
         terminalManager: terminalManager

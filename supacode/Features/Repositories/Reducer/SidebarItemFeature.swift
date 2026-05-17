@@ -52,6 +52,16 @@ struct SidebarItemFeature {
       case archiving
       case deletingScript
       case deleting
+
+      /// True for the wind-down states that should drop out of the Active
+      /// rail. `.pending` stays eligible: a row running its setup script is
+      /// exactly what Active is meant to surface.
+      var isTerminating: Bool {
+        switch self {
+        case .archiving, .deletingScript, .deleting: return true
+        case .idle, .pending: return false
+        }
+      }
     }
 
     var addedLines: Int?
@@ -208,6 +218,9 @@ extension SidebarItemFeature.State {
     if isPinned { return .pinned }
     return .default
   }
+  /// True iff any tracked agent on this row is awaiting user input.
+  /// Drives the Active section's classification ("agent awaiting input").
+  var hasAgentAwaitingInput: Bool { agents.contains(where: \.awaitingInput) }
 }
 
 extension SidebarItemFeature.State.Lifecycle {

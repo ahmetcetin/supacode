@@ -6,11 +6,14 @@ struct SidebarCommands: Commands {
   @FocusedValue(\.toggleLeftSidebarAction) private var toggleLeftSidebarAction
   @FocusedValue(\.revealInSidebarAction) private var revealInSidebarAction
   @Shared(.settingsFile) private var settingsFile
-  @Shared(.appStorage("worktreeRowDisplayMode")) private var displayMode: WorktreeRowDisplayMode = .branchFirst
   @Shared(.appStorage("worktreeRowHideSubtitleOnMatch")) private var hideSubtitleOnMatch = true
   @Shared(.sidebarNestWorktreesByBranch) private var nestWorktreesByBranch: Bool
   @Shared(.appStorage("nestedWorktreesOnboardingDismissedAt"))
   private var nestedOnboardingDismissedAt: Date = .distantPast
+  @Shared(.sidebarGroupPinnedRows) private var groupPinnedRows: Bool
+  @Shared(.sidebarGroupActiveRows) private var groupActiveRows: Bool
+  @Shared(.appStorage("highlightRelevantOnboardingDismissedAt"))
+  private var highlightOnboardingDismissedAt: Date = .distantPast
 
   /// Binding that pairs the nesting toggle with a permadismiss of the
   /// onboarding card on transitions to `false`. Lives on the menu command
@@ -31,6 +34,38 @@ struct SidebarCommands: Commands {
     )
   }
 
+  /// Mirrors `nestWorktreesToggle` so the dismiss also fires when the menu
+  /// is used while the sidebar column is hidden (no `SidebarListView` body
+  /// is alive to dispatch `.sidebarGroupingTogglesChanged`). The reducer
+  /// handler still fires when the sidebar is visible, so this is a
+  /// belt-and-suspenders pair, not the only trigger.
+  private var groupPinnedRowsToggle: Binding<Bool> {
+    Binding(
+      get: { groupPinnedRows },
+      set: { newValue in
+        $groupPinnedRows.withLock { $0 = newValue }
+        dismissHighlightOnboardingIfBothOff()
+      }
+    )
+  }
+
+  private var groupActiveRowsToggle: Binding<Bool> {
+    Binding(
+      get: { groupActiveRows },
+      set: { newValue in
+        $groupActiveRows.withLock { $0 = newValue }
+        dismissHighlightOnboardingIfBothOff()
+      }
+    )
+  }
+
+  private func dismissHighlightOnboardingIfBothOff() {
+    guard !groupPinnedRows, !groupActiveRows,
+      !HighlightRelevantOnboardingCardView.isDismissed(at: highlightOnboardingDismissedAt)
+    else { return }
+    $highlightOnboardingDismissedAt.withLock { $0 = .now }
+  }
+
   var body: some Commands {
     let overrides = settingsFile.global.shortcutOverrides
     let toggleLeftSidebar = AppShortcuts.toggleLeftSidebar.effective(from: overrides)
@@ -49,13 +84,12 @@ struct SidebarCommands: Commands {
       .help("Reveal in Sidebar (\(revealInSidebar?.display ?? "none"))")
       .disabled(revealInSidebarAction == nil)
       Section {
-        Picker("Title and Subtitle", systemImage: "textformat", selection: Binding($displayMode)) {
-          ForEach(WorktreeRowDisplayMode.allCases) { mode in
-            Text(mode.label).tag(mode)
-          }
+        Menu("Group Relevant Sidebar Rows") {
+          Toggle("Group Pinned Rows", isOn: groupPinnedRowsToggle)
+          Toggle("Group Active Rows", isOn: groupActiveRowsToggle)
         }
-        Toggle("Hide Subtitle on Match", isOn: Binding($hideSubtitleOnMatch))
         Toggle("Nest Worktrees by Branch", isOn: nestWorktreesToggle)
+        Toggle("Hide Worktree Name on Match", isOn: Binding($hideSubtitleOnMatch))
       }
     }
   }

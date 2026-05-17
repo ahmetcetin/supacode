@@ -153,4 +153,18 @@ nonisolated extension SharedReaderKey where Self == AppStorageKey<Bool>.Default 
   static var sidebarNestWorktreesByBranch: Self {
     Self[.appStorage("sidebarNestWorktreesByBranch"), default: true]
   }
+
+  /// "Group Pinned Rows" view-menu toggle. When on, pinned rows from every
+  /// repository are hoisted into a single Pinned section at the top of the
+  /// sidebar. Defaults to on so the feature is discoverable on first launch.
+  static var sidebarGroupPinnedRows: Self {
+    Self[.appStorage("sidebarGroupPinnedRows"), default: true]
+  }
+
+  /// "Group Active Rows" view-menu toggle. When on, rows with unread
+  /// notifications / agents / awaiting input / running scripts are hoisted
+  /// into a single Active section at the top of the sidebar.
+  static var sidebarGroupActiveRows: Self {
+    Self[.appStorage("sidebarGroupActiveRows"), default: true]
+  }
 }

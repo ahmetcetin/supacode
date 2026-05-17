@@ -148,6 +148,12 @@ struct RepositoriesFeature {
     /// State so the reducer's hotkey / arrow navigation walks the same
     /// trie-filtered row list the sidebar actually renders.
     @Shared(.sidebarNestWorktreesByBranch) var sidebarNestWorktreesByBranch: Bool
+    /// Single source of truth the sidebar view renders against. Recomputed
+    /// inside the reducer (see `recomputeSidebarStructureIfChanged()`) so
+    /// `SidebarListView.body` is a dumb iterator. The Equatable diff guard
+    /// in the recompute helper keeps a no-op rebuild from invalidating
+    /// SwiftUI when the user-visible layout didn't actually change.
+    var sidebarStructure: SidebarStructure = .placeholder
     @Presents var worktreeCreationPrompt: WorktreeCreationPromptFeature.State?
     @Presents var repositoryCustomization: RepositoryCustomizationFeature.State?
     @Presents var alert: AlertState<Alert>?
@@ -203,6 +209,19 @@ struct RepositoriesFeature {
   enum Action {
     case sidebarItems(IdentifiedActionOf<SidebarItemFeature>)
     case task
+    /// Fired by `SidebarListView.onChange` whenever `@Shared(.sidebarGroupPinnedRows)`
+    /// or `@Shared(.sidebarGroupActiveRows)` mutates while the sidebar is mounted.
+    /// The post-reduce hook picks up the new toggle state and rebuilds the cached
+    /// structure; the explicit handler also fires the highlight-onboarding
+    /// auto-dismiss. Toggling from the menu while the sidebar column is collapsed
+    /// bypasses this action; the matching dismiss in `SidebarCommands` setters
+    /// covers that path.
+    case sidebarGroupingTogglesChanged
+    /// Fired by `SidebarListView.onChange` whenever `@Shared(.sidebarNestWorktreesByBranch)`
+    /// mutates. Triggers a structure recompute so the alphabetical per-bucket
+    /// sort that nesting forces shows up in `slotByID` / `hotkeySlots` (which
+    /// the view reads to assign ⌃1..⌃0 hotkeys).
+    case sidebarNestByBranchChanged
     case setOpenPanelPresented(Bool)
     case loadPersistedRepositories
     case refreshWorktrees
@@ -426,6 +445,28 @@ struct RepositoriesFeature {
         // the focus restore and kicks off the repository load.
         state.shouldRestoreLastFocusedWorktree = state.sidebar.focusedWorktreeID != nil
         return .send(.loadPersistedRepositories)
+
+      case .sidebarGroupingTogglesChanged:
+        // The post-reduce hook below picks up the toggle state and rebuilds.
+        // Auto-dismiss the highlight onboarding card when both toggles end up
+        // off; the `SidebarCommands` menu setters fire the same dismiss so
+        // toggling while the sidebar column is collapsed is also covered.
+        @Shared(.sidebarGroupPinnedRows) var groupPinned
+        @Shared(.sidebarGroupActiveRows) var groupActive
+        if !groupPinned, !groupActive {
+          @Shared(.appStorage("highlightRelevantOnboardingDismissedAt"))
+          var dismissedAt: Date = .distantPast
+          if !HighlightRelevantOnboardingCardView.isDismissed(at: dismissedAt) {
+            $dismissedAt.withLock { $0 = now }
+          }
+        }
+        return .none
+
+      case .sidebarNestByBranchChanged:
+        // No-op handler: the post-reduce hook reads `sidebarNestWorktreesByBranch`
+        // and rebuilds `sidebarStructure` so the alphabetical per-bucket sort
+        // lands in `slotByID` / `hotkeySlots`.
+        return .none
 
       case .setOpenPanelPresented(let isPresented):
         state.isOpenPanelPresented = isPresented
@@ -2362,37 +2403,36 @@ struct RepositoriesFeature {
         )
 
       case .pinWorktree(let worktreeID):
-        // Main worktrees never appear in any sidebar bucket (the
-        // seed pass skips them), so pinning one is a no-op.
+        // Git "main" worktrees never appear in any sidebar bucket (the
+        // seed pass skips them), so pinning one is a no-op. Folder
+        // synthetic worktrees satisfy `isMainWorktree` by geometry but
+        // ARE pinnable; scope the skip to git repos so folders fall
+        // through to the bucket machinery below.
         guard let worktree = state.worktree(for: worktreeID),
           let repositoryID = state.repositoryID(containing: worktreeID),
           let repository = state.repositories[id: repositoryID]
         else {
           return .none
         }
-        // Folder-synthetic worktrees pass `isMainWorktree` by
-        // geometry. Surface the deeplink-equivalent alert instead
-        // of silently no-op-ing for folders; for git mains the
-        // silent skip is still correct (main-worktree pinning is
-        // invalid by design).
-        if !repository.isGitRepository {
-          state.alert = folderIncompatibleAlert(action: .pin)
+        if repository.isGitRepository, state.isMainWorktree(worktree) {
           return .none
         }
-        if state.isMainWorktree(worktree) {
-          return .none
-        }
+        // Pin / unpin are unarchive-adjacent (the new bucket flow drops
+        // `archivedAt` via `removeAnywhere` + `insert`). Refuse to pin
+        // an archived row so a deeplink or programmatic dispatch can't
+        // silently resurrect it; the user must unarchive first.
+        if state.isWorktreeArchived(worktreeID) { return .none }
         analyticsClient.capture("worktree_pinned", nil)
         state.$sidebar.withLock { sidebar in
-          // The seed invariant puts every non-main worktree into
-          // either `.pinned` or `.unpinned`. A second click on an
-          // already-pinned row reorders it to the top.
-          let from = sidebar.currentBucket(of: worktreeID, in: repositoryID) ?? .unpinned
-          sidebar.move(
+          // `removeAnywhere` + `insert` enforces the "exactly one bucket"
+          // invariant against pre-states that have the row in `.pinned` and
+          // `.unpinned` simultaneously (hand-edit, migrator race) and also
+          // handles the not-bucketed case (folders before first reconcile).
+          sidebar.removeAnywhere(worktree: worktreeID, in: repositoryID)
+          sidebar.insert(
             worktree: worktreeID,
             in: repositoryID,
-            from: from,
-            to: .pinned,
+            bucket: .pinned,
             position: 0
           )
         }
@@ -2401,21 +2441,23 @@ struct RepositoriesFeature {
 
       case .unpinWorktree(let worktreeID):
         guard let repositoryID = state.repositoryID(containing: worktreeID),
-          let repository = state.repositories[id: repositoryID]
+          state.repositories[id: repositoryID] != nil
         else {
           return .none
         }
-        if !repository.isGitRepository {
-          state.alert = folderIncompatibleAlert(action: .unpin)
-          return .none
-        }
+        // Mirrors the `pinWorktree` archive guard: don't let an archived
+        // row trip through the bucket machinery and lose its `archivedAt`
+        // timestamp as a side effect.
+        if state.isWorktreeArchived(worktreeID) { return .none }
         analyticsClient.capture("worktree_unpinned", nil)
         state.$sidebar.withLock { sidebar in
-          sidebar.move(
+          // Same invariant as `pinWorktree`: collapse any pre-existing
+          // bucket placement into a single `.unpinned` entry.
+          sidebar.removeAnywhere(worktree: worktreeID, in: repositoryID)
+          sidebar.insert(
             worktree: worktreeID,
             in: repositoryID,
-            from: .pinned,
-            to: .unpinned,
+            bucket: .unpinned,
             position: 0
           )
         }
@@ -3252,6 +3294,19 @@ struct RepositoriesFeature {
     .ifLet(\.$repositoryCustomization, action: \.repositoryCustomization) {
       RepositoryCustomizationFeature()
     }
+    // Targeted post-reduce hook: only the actions that demonstrably touch
+    // structure inputs trigger a recompute. The Equatable diff inside the
+    // helper suppresses no-op rebuilds at the SwiftUI layer. Gated on
+    // `\.sidebarStructureAutoRecompute` (defaults to true everywhere); a few
+    // legacy tests that don't care about sidebar layout opt out via
+    // `withDependencies`.
+    Reduce { state, action in
+      @Dependency(\.sidebarStructureAutoRecompute) var autoRecompute
+      if autoRecompute, action.affectsSidebarStructure {
+        state.recomputeSidebarStructureIfChanged()
+      }
+      return .none
+    }
   }
 
   private func refreshRepositoryPullRequests(
@@ -3665,15 +3720,23 @@ extension RepositoriesFeature.State {
   }
 
   func worktreeID(byOffset offset: Int) -> Worktree.ID? {
-    // Walk the same ordered list Cmd+1..9 binds to, so arrow navigation and slot
-    // selection agree with what the sidebar shows (pinned, pending, non-pending).
-    let ids = orderedSidebarItemIDs(includingRepositoryIDs: expandedRepositoryIDs)
+    // Walk the structure's `hotkeySlots`, which already reflects the
+    // visible top-down order (hoisted Pinned + Active first, then per-repo
+    // with hoisted rows filtered out, with the nest-by-branch alphabetical
+    // sort applied). Arrow navigation, ⌃1..⌃0 hotkeys, and the menu-bar
+    // slot picker all bind to the same visual ordering. The post-reduce
+    // hook keeps the cache fresh for every structure-affecting action,
+    // including in tests, so reading the cache here is always live.
+    let ids = sidebarStructure.hotkeySlots.map(\.id)
     guard !ids.isEmpty else { return nil }
     if let currentID = selectedWorktreeID, let currentIndex = ids.firstIndex(of: currentID) {
       return ids[(currentIndex + offset + ids.count) % ids.count]
     }
     // Selection hidden behind a collapsed group: land on the nearest visible
     // neighbor in the direction of travel rather than jumping top / bottom.
+    // The unfiltered anchor list intentionally walks the per-repo bucket
+    // order (collapsed groups expanded) since hoisted rows are always
+    // visible and therefore never fall through to this branch.
     if let currentID = selectedWorktreeID,
       let anchor = hiddenSelectionAnchor(currentID: currentID, visibleIDs: ids),
       let neighbor = nearestVisibleNeighbor(
@@ -4074,8 +4137,8 @@ extension RepositoriesFeature.State {
     guard useNesting, !rowIDs.isEmpty else { return rowIDs }
     let collapsedPrefixes: Set<String> =
       ignoreCollapsedGroups
-        ? []
-        : sidebar.sections[repositoryID]?.buckets[bucket]?.collapsedBranchPrefixes ?? []
+      ? []
+      : sidebar.sections[repositoryID]?.buckets[bucket]?.collapsedBranchPrefixes ?? []
     // `uniquingKeysWith` so a transient duplicate row ID can't crash the hotkey path.
     let branchNames = Dictionary(
       rowIDs.compactMap { id -> (SidebarItemID, String)? in
@@ -4102,7 +4165,16 @@ extension RepositoriesFeature.State {
   /// across PR / lifecycle ticks. Lets `focusedSceneValue` dedupe so open submenus
   /// don't rebuild and drop hover.
   func hotkeyWorktreeSlots(includingRepositoryIDs: Set<Repository.ID>) -> [HotkeyWorktreeSlot] {
-    orderedSidebarItemIDs(includingRepositoryIDs: includingRepositoryIDs).compactMap { id in
+    hotkeyWorktreeSlots(
+      for: orderedSidebarItemIDs(includingRepositoryIDs: includingRepositoryIDs)
+    )
+  }
+
+  /// Project a caller-provided ID list into menu slots. Used when the sidebar
+  /// has composed an order the reducer can't derive on its own (e.g. highlight
+  /// sections hoisted above per-repo rows).
+  func hotkeyWorktreeSlots(for ids: [Worktree.ID]) -> [HotkeyWorktreeSlot] {
+    ids.compactMap { id in
       guard let item = sidebarItems[id: id] else { return nil }
       return HotkeyWorktreeSlot(id: item.id, name: item.name, repositoryID: item.repositoryID)
     }
@@ -4576,7 +4648,11 @@ extension RepositoriesFeature.State {
         rebuilt[repoID] = section
         continue
       }
-      let mainID = repository.worktrees.first(where: { isMainWorktree($0) })?.id
+      // Folder synthetic worktrees satisfy `isMainWorktree` by geometry but are
+      // user-pinnable. Scope the main-worktree skip to git repos so a pin on a
+      // folder survives `.repositoriesLoaded`.
+      let mainID =
+        repository.isGitRepository ? repository.worktrees.first(where: { isMainWorktree($0) })?.id : nil
       let worktreeIDs = Set(repository.worktrees.map(\.id))
       var copy = section
       var seenInCuratedBuckets: Set<Worktree.ID> = []
@@ -4584,7 +4660,7 @@ extension RepositoriesFeature.State {
         if bucketID == .archived { continue }
         var prunedItems: OrderedDictionary<Worktree.ID, SidebarState.Item> = [:]
         for (worktreeID, item) in bucket.items {
-          if worktreeID == mainID { continue }
+          if let mainID, worktreeID == mainID { continue }
           if pruneLivenessAgainstRoster, !worktreeIDs.contains(worktreeID) { continue }
           prunedItems[worktreeID] = item
           seenInCuratedBuckets.insert(worktreeID)
@@ -4600,7 +4676,7 @@ extension RepositoriesFeature.State {
       // Seed every live non-main worktree that isn't already curated. Mutation
       // actions assume every live worktree has a bucket and skip fallback paths.
       for worktree in repository.worktrees {
-        if worktree.id == mainID { continue }
+        if let mainID, worktree.id == mainID { continue }
         if seenInCuratedBuckets.contains(worktree.id) || archivedIDs.contains(worktree.id) { continue }
         var unpinned = copy.buckets[.unpinned] ?? .init()
         unpinned.items[worktree.id] = .init()
