@@ -154,6 +154,16 @@ struct RepositoriesFeature {
     /// in the recompute helper keeps a no-op rebuild from invalidating
     /// SwiftUI when the user-visible layout didn't actually change.
     var sidebarStructure: SidebarStructure = .placeholder
+    /// Cached projection of the focused row's display fields. The detail body
+    /// reads this directly instead of `sidebarItems[id: id]` so per-leaf agent
+    /// / notification mutations on the focused row don't invalidate the
+    /// detail tree. Recomputed via `recomputeSelectedWorktreeSliceIfChanged()`.
+    var selectedWorktreeSlice: SelectedWorktreeSlice?
+    /// Cached toolbar notification snapshot. Detail body reads this instead of
+    /// iterating `sidebarItems` (which would observe every per-row notification
+    /// mutation across all worktrees). Recomputed via
+    /// `recomputeToolbarNotificationGroupsIfChanged()`.
+    var toolbarNotificationGroupsCache: [ToolbarNotificationRepositoryGroup] = []
     @Presents var worktreeCreationPrompt: WorktreeCreationPromptFeature.State?
     @Presents var repositoryCustomization: RepositoryCustomizationFeature.State?
     @Presents var alert: AlertState<Alert>?
@@ -245,6 +255,7 @@ struct RepositoriesFeature {
       roots: [URL]
     )
     case selectWorktree(Worktree.ID?, focusTerminal: Bool = false)
+    case selectWorktreeAtHotkeySlot(Int)
     case selectNextWorktree
     case selectPreviousWorktree
     case worktreeHistoryBack
@@ -377,12 +388,12 @@ struct RepositoriesFeature {
     let message: String
   }
 
-  struct DeleteWorktreeTarget: Equatable {
+  struct DeleteWorktreeTarget: Hashable {
     let worktreeID: Worktree.ID
     let repositoryID: Repository.ID
   }
 
-  struct ArchiveWorktreeTarget: Equatable {
+  struct ArchiveWorktreeTarget: Hashable {
     let worktreeID: Worktree.ID
     let repositoryID: Repository.ID
   }
@@ -396,7 +407,7 @@ struct RepositoriesFeature {
     case success(String)
   }
 
-  enum Alert: Equatable {
+  enum Alert: Hashable {
     case confirmArchiveWorktree(Worktree.ID, Repository.ID)
     case confirmArchiveWorktrees([ArchiveWorktreeTarget])
     case confirmDeleteSidebarItems([DeleteWorktreeTarget], disposition: DeleteDisposition)
@@ -714,12 +725,26 @@ struct RepositoriesFeature {
         }
         return .merge(effects)
 
+      case .selectWorktreeAtHotkeySlot(let index):
+        // Snapshot-driven menu items capture only the slot index, so the
+        // current `hotkeySlots` lookup happens here at action time. Out-of-range
+        // slots beep so the user gets feedback that the shortcut hit nothing.
+        let slots = state.sidebarStructure.hotkeySlots
+        guard slots.indices.contains(index) else {
+          return .run { _ in NSSound.beep() }
+        }
+        return .send(.selectWorktree(slots[index].id))
+
       case .selectNextWorktree:
-        guard let id = state.worktreeID(byOffset: 1) else { return .none }
+        guard let id = state.worktreeID(byOffset: 1) else {
+          return .run { _ in NSSound.beep() }
+        }
         return .send(.selectWorktree(id))
 
       case .selectPreviousWorktree:
-        guard let id = state.worktreeID(byOffset: -1) else { return .none }
+        guard let id = state.worktreeID(byOffset: -1) else {
+          return .run { _ in NSSound.beep() }
+        }
         return .send(.selectWorktree(id))
 
       case .worktreeHistoryBack:
@@ -3302,9 +3327,8 @@ struct RepositoriesFeature {
     // `withDependencies`.
     Reduce { state, action in
       @Dependency(\.sidebarStructureAutoRecompute) var autoRecompute
-      if autoRecompute, action.affectsSidebarStructure {
-        state.recomputeSidebarStructureIfChanged()
-      }
+      guard autoRecompute else { return .none }
+      state.applyCacheRecomputes(action.cacheInvalidations)
       return .none
     }
   }
@@ -4174,9 +4198,15 @@ extension RepositoriesFeature.State {
   /// has composed an order the reducer can't derive on its own (e.g. highlight
   /// sections hoisted above per-repo rows).
   func hotkeyWorktreeSlots(for ids: [Worktree.ID]) -> [HotkeyWorktreeSlot] {
-    ids.compactMap { id in
+    let nameByRepoID = Dictionary(uniqueKeysWithValues: repositories.map { ($0.id, $0.name) })
+    return ids.compactMap { id in
       guard let item = sidebarItems[id: id] else { return nil }
-      return HotkeyWorktreeSlot(id: item.id, name: item.name, repositoryID: item.repositoryID)
+      return HotkeyWorktreeSlot(
+        id: item.id,
+        name: item.name,
+        repositoryID: item.repositoryID,
+        repositoryName: nameByRepoID[item.repositoryID] ?? ""
+      )
     }
   }
 }

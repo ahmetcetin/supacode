@@ -5,38 +5,49 @@ import SupacodeSettingsFeature
 import SupacodeSettingsShared
 import SwiftUI
 
+#if DEBUG
+  private nonisolated let commandsRenderLogger = SupaLogger("DetailRender")
+#endif
+
+/// Umbrella that wires the worktree-related menu-bar contributions. Each
+/// child is its own `Commands` struct so SwiftUI re-renders only the one
+/// whose observed inputs changed; e.g. the static Select Worktree submenu
+/// never re-runs during agent storms even when the main menu's snapshot
+/// fields tick.
 struct WorktreeCommands: Commands {
+  @Bindable var store: StoreOf<AppFeature>
+
+  var body: some Commands {
+    WorktreeMainMenu(store: store)
+    WorktreeFileMenu(store: store)
+  }
+}
+
+/// The "Worktrees" `CommandMenu`. Re-renders when the snapshot or any read
+/// focused value changes; the inner Select-Worktree submenu is its own
+/// struct so its static 10-item rendering doesn't churn with the rest.
+private struct WorktreeMainMenu: Commands {
   @Bindable var store: StoreOf<AppFeature>
   @FocusedValue(\.openSelectedWorktreeAction) private var openSelectedWorktreeAction
   @FocusedValue(\.revealInFinderAction) private var revealInFinderAction
   @FocusedValue(\.openActionSelection) private var openActionSelection
-  @FocusedValue(\.confirmWorktreeAction) private var confirmWorktreeAction
   @FocusedValue(\.archiveWorktreeAction) private var archiveWorktreeAction
   @FocusedValue(\.deleteWorktreeAction) private var deleteWorktreeAction
   @FocusedValue(\.runScriptAction) private var runScriptAction
   @FocusedValue(\.stopRunScriptAction) private var stopRunScriptAction
-  @FocusedValue(\.visibleHotkeyWorktreeRows) private var visibleHotkeyWorktreeRows
-
-  init(store: StoreOf<AppFeature>) {
-    self.store = store
-  }
 
   var body: some Commands {
-    let overrides = store.settings.shortcutOverrides
-    let repositories = store.repositories
-    let orderedRows = visibleHotkeyWorktreeRows ?? repositories.hotkeyWorktreeSlots()
-    let pullRequestURL = selectedPullRequestURL
-    let githubIntegrationEnabled = store.settings.githubIntegrationEnabled
+    #if DEBUG
+      let _: Void = commandsRenderLogger.info("WorktreeMainMenu.body re-rendered")
+    #endif
+    let snapshot = store.worktreeMenuSnapshot
+    let overrides = snapshot.shortcutOverrides
     let selectNext = AppShortcuts.selectNextWorktree.effective(from: overrides)
     let selectPrevious = AppShortcuts.selectPreviousWorktree.effective(from: overrides)
     let historyBack = AppShortcuts.worktreeHistoryBack.effective(from: overrides)
     let historyForward = AppShortcuts.worktreeHistoryForward.effective(from: overrides)
-    let canGoBack = repositories.canNavigateWorktreeHistoryBackward
-    let canGoForward = repositories.canNavigateWorktreeHistoryForward
     let archive = AppShortcuts.archiveWorktree.effective(from: overrides)
     let deleteWt = AppShortcuts.deleteWorktree.effective(from: overrides)
-    let confirm = AppShortcuts.confirmWorktreeAction.effective(from: overrides)
-    let openRepo = AppShortcuts.openRepository.effective(from: overrides)
     let openWorktree = AppShortcuts.openWorktree.effective(from: overrides)
     let revealInFinder = AppShortcuts.revealInFinder.effective(from: overrides)
     let openPR = AppShortcuts.openPullRequest.effective(from: overrides)
@@ -47,13 +58,12 @@ struct WorktreeCommands: Commands {
     let stop = AppShortcuts.stopRunScript.effective(from: overrides)
     let jumpToLatestUnread = AppShortcuts.jumpToLatestUnread.effective(from: overrides)
     CommandMenu("Worktrees") {
-      // Creation and opening.
       Button("New Worktree…", systemImage: "plus") {
         store.send(.repositories(.createRandomWorktree))
       }
       .appKeyboardShortcut(newWt)
       .help("New Worktree (\(newWt?.display ?? "none"))")
-      .disabled(!repositories.canCreateWorktree)
+      .disabled(!snapshot.canCreateWorktree)
       Divider()
       let openLabel = openActionSelection.map { "Open in \($0.labelTitle)" } ?? "Open"
       Button(openLabel, systemImage: "arrow.up.right.square") {
@@ -61,107 +71,130 @@ struct WorktreeCommands: Commands {
       }
       .appKeyboardShortcut(openWorktree)
       .help("\(openLabel) (\(openWorktree?.display ?? "none"))")
-      .disabled(openSelectedWorktreeAction == nil)
+      .disabled(openSelectedWorktreeAction?.isEnabled != true)
       Button("Reveal in Finder", systemImage: "folder") {
         revealInFinderAction?()
       }
       .appKeyboardShortcut(revealInFinder)
       .help("Reveal in Finder (\(revealInFinder?.display ?? "none"))")
-      .disabled(revealInFinderAction == nil)
+      .disabled(revealInFinderAction?.isEnabled != true)
       Button("Open Pull Request", systemImage: "arrow.up.forward") {
-        if let pullRequestURL {
-          NSWorkspace.shared.open(pullRequestURL)
+        if let url = snapshot.selectedPullRequestURL {
+          NSWorkspace.shared.open(url)
         }
       }
       .appKeyboardShortcut(openPR)
       .help("Open Pull Request (\(openPR?.display ?? "none"))")
-      .disabled(pullRequestURL == nil || !githubIntegrationEnabled)
+      .disabled(snapshot.selectedPullRequestURL == nil || !snapshot.githubIntegrationEnabled)
       Divider()
-      // Lifecycle.
       Button("Refresh Worktrees", systemImage: "arrow.clockwise") {
         store.send(.repositories(.refreshWorktrees))
       }
       .appKeyboardShortcut(refresh)
       .help("Refresh (\(refresh?.display ?? "none"))")
-      .disabled(!repositories.isInitialLoadComplete)
+      .disabled(!snapshot.isInitialLoadComplete)
       Button("Archived Worktrees", systemImage: "archivebox") {
         store.send(.repositories(.selectArchivedWorktrees))
       }
       .appKeyboardShortcut(archived)
       .help("Archived Worktrees (\(archived?.display ?? "none"))")
-      .disabled(!repositories.isInitialLoadComplete)
+      .disabled(!snapshot.isInitialLoadComplete)
       Divider()
-      // Commands.
       Button("Archive Worktree…", systemImage: "archivebox") {
         archiveWorktreeAction?()
       }
       .appKeyboardShortcut(archive)
       .help("Archive Worktree (\(archive?.display ?? "none"))")
-      .disabled(archiveWorktreeAction == nil)
+      .disabled(archiveWorktreeAction?.isEnabled != true)
       Button("Delete Worktree…", systemImage: "trash") {
         deleteWorktreeAction?()
       }
       .appKeyboardShortcut(deleteWt)
       .help("Delete Worktree (\(deleteWt?.display ?? "none"))")
-      .disabled(deleteWorktreeAction == nil)
+      .disabled(deleteWorktreeAction?.isEnabled != true)
       Divider()
-      // Scripts.
       Button("Run Script", systemImage: ScriptKind.run.defaultSystemImage) {
         runScriptAction?()
       }
       .appKeyboardShortcut(run)
       .help("Run Script (\(run?.display ?? "none"))")
-      .disabled(runScriptAction == nil)
+      .disabled(runScriptAction?.isEnabled != true)
       Button("Stop Script", systemImage: "stop") {
         stopRunScriptAction?()
       }
       .appKeyboardShortcut(stop)
       .help("Stop Script (\(stop?.display ?? "none"))")
-      .disabled(stopRunScriptAction == nil)
+      .disabled(stopRunScriptAction?.isEnabled != true)
       Button("Jump to Latest Unread", systemImage: "bell.badge") {
         store.send(.jumpToLatestUnread)
       }
       .appKeyboardShortcut(jumpToLatestUnread)
       .help("Jump to Latest Unread Notification (\(jumpToLatestUnread?.display ?? "none"))")
-      .disabled(store.notificationIndicatorCount == 0)
+      .disabled(snapshot.notificationIndicatorCount == 0)
       Divider()
-      // Navigation.
+      // Always-enabled; the reducer beeps when there's no worktree to move to.
       Button("Select Next", systemImage: "chevron.down") {
         store.send(.repositories(.selectNextWorktree))
       }
       .appKeyboardShortcut(selectNext)
       .help("Select Next (\(selectNext?.display ?? "none"))")
-      .disabled(orderedRows.isEmpty)
       Button("Select Previous", systemImage: "chevron.up") {
         store.send(.repositories(.selectPreviousWorktree))
       }
       .appKeyboardShortcut(selectPrevious)
       .help("Select Previous (\(selectPrevious?.display ?? "none"))")
-      .disabled(orderedRows.isEmpty)
       Button("Back in Worktree History", systemImage: "chevron.left") {
         store.send(.repositories(.worktreeHistoryBack))
       }
       .appKeyboardShortcut(historyBack)
       .help("Back in Worktree History (\(historyBack?.display ?? "none"))")
-      .disabled(!canGoBack)
+      .disabled(!snapshot.canNavigateBackward)
       Button("Forward in Worktree History", systemImage: "chevron.right") {
         store.send(.repositories(.worktreeHistoryForward))
       }
       .appKeyboardShortcut(historyForward)
       .help("Forward in Worktree History (\(historyForward?.display ?? "none"))")
-      .disabled(!canGoForward)
-      // Skip inactive slots so SwiftUI never emits a Button whose stale keyEquivalent misroutes keys.
-      let slots = AppShortcuts.activeWorktreeSelectionSlots(
-        overrides: overrides,
-        orderedRowsCount: orderedRows.count
-      )
-      .map { WorktreeSelectionSlot(shortcut: $0.shortcut, row: orderedRows[$0.index]) }
+      .disabled(!snapshot.canNavigateForward)
       Menu("Select Worktree") {
-        ForEach(slots, id: \.shortcut.id) { slot in
-          WorktreeShortcutButton(slot: slot, store: store)
-        }
+        SelectWorktreeSubmenuItems(store: store, overrides: overrides)
       }
     }
+  }
+}
+
+/// Static 10-item submenu. Labels and per-item actions never change, so the
+/// menu bar doesn't rebuild during agent storms. Out-of-range slots beep at
+/// fire time (handled in the reducer) so we don't need a disabled state here.
+private struct SelectWorktreeSubmenuItems: View {
+  let store: StoreOf<AppFeature>
+  let overrides: [AppShortcutID: AppShortcutOverride]
+
+  var body: some View {
+    ForEach(0..<AppShortcuts.worktreeSelection.count, id: \.self) { index in
+      let shortcut = AppShortcuts.worktreeSelection[index].effective(from: overrides)
+      Button("Select Worktree \(index + 1)") {
+        store.send(.repositories(.selectWorktreeAtHotkeySlot(index)))
+      }
+      .appKeyboardShortcut(shortcut)
+      .help("Select Worktree \(index + 1) (\(shortcut?.display ?? "no shortcut"))")
+    }
+  }
+}
+
+/// File menu extras (Add Repository / Confirm Action). Split out so the
+/// "Worktrees" menu's heavier snapshot dependency doesn't pull this body
+/// along on every per-row mutation.
+private struct WorktreeFileMenu: Commands {
+  @Bindable var store: StoreOf<AppFeature>
+  @FocusedValue(\.confirmWorktreeAction) private var confirmWorktreeAction
+
+  var body: some Commands {
+    #if DEBUG
+      let _: Void = commandsRenderLogger.info("WorktreeFileMenu.body re-rendered")
+    #endif
+    let overrides = store.worktreeMenuSnapshot.shortcutOverrides
+    let openRepo = AppShortcuts.openRepository.effective(from: overrides)
+    let confirm = AppShortcuts.confirmWorktreeAction.effective(from: overrides)
     CommandGroup(replacing: .newItem) {
       Button("Add Repository or Folder...", systemImage: "folder.badge.plus") {
         store.send(.repositories(.setOpenPanelPresented(true)))
@@ -173,61 +206,31 @@ struct WorktreeCommands: Commands {
       }
       .appKeyboardShortcut(confirm)
       .help("Confirm Action (\(confirm?.display ?? "none"))")
-      .disabled(confirmWorktreeAction == nil)
+      .disabled(confirmWorktreeAction?.isEnabled != true)
     }
   }
-
-  private var selectedPullRequestURL: URL? {
-    let repositories = store.repositories
-    guard let selectedWorktreeID = repositories.selectedWorktreeID else { return nil }
-    let pullRequest = repositories.sidebarItems[id: selectedWorktreeID]?.pullRequest
-    return pullRequest.flatMap { URL(string: $0.url) }
-  }
-
 }
 
-/// Stable projection published through `focusedSceneValue(\.visibleHotkeyWorktreeRows)`.
-/// Carries only fields the menu actually needs so per-row PR / lifecycle ticks
-/// dedupe and don't churn the menu bar (which rebuilds open submenus and drops hover).
+/// Stable projection used by the sidebar's slot-to-row resolution.
+/// `repositoryName` is carried for any UI that wants to render a repo-aware
+/// label without re-pulling whole `repositories` substate observation.
 struct HotkeyWorktreeSlot: Equatable, Hashable, Identifiable, Sendable {
   let id: Worktree.ID
   let name: String
   let repositoryID: Repository.ID
-}
-
-private struct WorktreeSelectionSlot {
-  let shortcut: AppShortcut
-  let row: HotkeyWorktreeSlot
-}
-
-private struct WorktreeShortcutButton: View {
-  let slot: WorktreeSelectionSlot
-  let store: StoreOf<AppFeature>
-
-  private var title: String {
-    let repositoryName = store.repositories.repositoryName(for: slot.row.repositoryID) ?? "Repository"
-    return "\(repositoryName) · \(slot.row.name)"
-  }
-
-  var body: some View {
-    Button(title) {
-      store.send(.repositories(.selectWorktree(slot.row.id)))
-    }
-    .appKeyboardShortcut(slot.shortcut)
-    .help("Switch to \(title) (\(slot.shortcut.display))")
-  }
+  let repositoryName: String
 }
 
 private struct ArchiveWorktreeActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 private struct OpenSelectedWorktreeActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 private struct RevealInFinderActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 private struct OpenActionSelectionKey: FocusedValueKey {
@@ -235,20 +238,20 @@ private struct OpenActionSelectionKey: FocusedValueKey {
 }
 
 private struct DeleteWorktreeActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 private struct ConfirmWorktreeActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 extension FocusedValues {
-  var openSelectedWorktreeAction: (() -> Void)? {
+  var openSelectedWorktreeAction: FocusedAction<Void>? {
     get { self[OpenSelectedWorktreeActionKey.self] }
     set { self[OpenSelectedWorktreeActionKey.self] = newValue }
   }
 
-  var revealInFinderAction: (() -> Void)? {
+  var revealInFinderAction: FocusedAction<Void>? {
     get { self[RevealInFinderActionKey.self] }
     set { self[RevealInFinderActionKey.self] = newValue }
   }
@@ -258,45 +261,36 @@ extension FocusedValues {
     set { self[OpenActionSelectionKey.self] = newValue }
   }
 
-  var confirmWorktreeAction: (() -> Void)? {
+  var confirmWorktreeAction: FocusedAction<Void>? {
     get { self[ConfirmWorktreeActionKey.self] }
     set { self[ConfirmWorktreeActionKey.self] = newValue }
   }
 
-  var archiveWorktreeAction: (() -> Void)? {
+  var archiveWorktreeAction: FocusedAction<Void>? {
     get { self[ArchiveWorktreeActionKey.self] }
     set { self[ArchiveWorktreeActionKey.self] = newValue }
   }
 
-  var deleteWorktreeAction: (() -> Void)? {
+  var deleteWorktreeAction: FocusedAction<Void>? {
     get { self[DeleteWorktreeActionKey.self] }
     set { self[DeleteWorktreeActionKey.self] = newValue }
   }
 
-  var runScriptAction: (() -> Void)? {
+  var runScriptAction: FocusedAction<Void>? {
     get { self[RunScriptActionKey.self] }
     set { self[RunScriptActionKey.self] = newValue }
   }
 
-  var stopRunScriptAction: (() -> Void)? {
+  var stopRunScriptAction: FocusedAction<Void>? {
     get { self[StopRunScriptActionKey.self] }
     set { self[StopRunScriptActionKey.self] = newValue }
-  }
-
-  var visibleHotkeyWorktreeRows: [HotkeyWorktreeSlot]? {
-    get { self[VisibleHotkeyWorktreeRowsKey.self] }
-    set { self[VisibleHotkeyWorktreeRowsKey.self] = newValue }
   }
 }
 
 private struct RunScriptActionKey: FocusedValueKey {
-  typealias Value = () -> Void
+  typealias Value = FocusedAction<Void>
 }
 
 private struct StopRunScriptActionKey: FocusedValueKey {
-  typealias Value = () -> Void
-}
-
-private struct VisibleHotkeyWorktreeRowsKey: FocusedValueKey {
-  typealias Value = [HotkeyWorktreeSlot]
+  typealias Value = FocusedAction<Void>
 }

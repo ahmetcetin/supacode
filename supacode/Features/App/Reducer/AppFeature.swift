@@ -1,6 +1,7 @@
 import AppKit
 import ComposableArchitecture
 import Foundation
+import OrderedCollections
 import PostHog
 import SupacodeSettingsFeature
 import SupacodeSettingsShared
@@ -24,6 +25,10 @@ struct AppFeature {
     var settings: SettingsFeature.State
     var updates = UpdatesFeature.State()
     var commandPalette = CommandPaletteFeature.State()
+    /// Terminal-orchestration state. Owns the per-tab feature collection so
+    /// tab-bar views scope through `\.terminals` (narrow) instead of the full
+    /// app store. Mirrors sidebar's `RepositoriesFeature` ownership pattern.
+    var terminals = TerminalsFeature.State()
     var openActionSelection: OpenWorktreeAction = .finder
     var repoScripts: [ScriptDefinition] = []
     var globalScripts: [ScriptDefinition] = []
@@ -32,6 +37,12 @@ struct AppFeature {
     var lastKnownAgentPresenceBadgesEnabled: Bool
     var pendingDeeplinks: [Deeplink] = []
     var isDeeplinkReferenceRequested = false
+    /// Cached projection of every primitive the menu-bar `WorktreeCommands`
+    /// body reads. The menu observes ONE Equatable field instead of pulling
+    /// `\.repositories` / `\.settings` (whole-substate) observation through
+    /// `_modify`, which previously made every per-row mutation rebuild the
+    /// system menu and drop hover state (#289).
+    var worktreeMenuSnapshot: WorktreeMenuSnapshot = .init()
     @Presents var alert: AlertState<Alert>?
     @Presents var deeplinkInputConfirmation: DeeplinkInputConfirmationFeature.State?
 
@@ -48,6 +59,9 @@ struct AppFeature {
       // so deselection (line below in `selectedWorktreeChanged(nil)`)
       // intentionally does not clear them.
       globalScripts = settings.globalScripts
+      // Warm the cache so the first state mutation doesn't churn the snapshot
+      // and trip every TestStore expectation that omits a state-change closure.
+      worktreeMenuSnapshot = computeWorktreeMenuSnapshot()
     }
 
     /// Repo scripts followed by global scripts; repo wins on ID collisions.
@@ -66,13 +80,11 @@ struct AppFeature {
       allScripts.primaryScript
     }
 
-    /// Running script IDs for the currently selected worktree.
+    /// Running script IDs for the currently selected worktree. Sourced from
+    /// the cached slice so an agent storm on the focused row doesn't pull
+    /// observation through `sidebarItems[id:]`.
     var runningScriptIDs: Set<UUID> {
-      guard
-        let worktreeID = repositories.selectedWorktreeID,
-        let scripts = repositories.sidebarItems[id: worktreeID]?.runningScripts
-      else { return [] }
-      return Set(scripts.ids)
+      Set(repositories.selectedWorktreeSlice?.runningScripts.ids ?? [])
     }
 
     /// Whether any `.run`-kind script is currently running in the selected worktree.
@@ -83,6 +95,7 @@ struct AppFeature {
 
   enum Action {
     case agentPresence(AgentPresenceFeature.Action)
+    case terminals(TerminalsFeature.Action)
     case appLaunched
     case scenePhaseChanged(ScenePhase)
     case repositories(RepositoriesFeature.Action)
@@ -958,6 +971,23 @@ struct AppFeature {
           )
         )
 
+      case .terminalEvent(.tabProjectionChanged(let worktreeID, let projection)):
+        return .send(.terminals(.tabProjectionChanged(worktreeID: worktreeID, projection: projection)))
+
+      case .terminalEvent(.tabRemoved(let worktreeID, let tabID)):
+        return .send(.terminals(.tabRemoved(worktreeID: worktreeID, tabID: tabID)))
+
+      case .terminalEvent(.worktreeStateTornDown(let worktreeID)):
+        return .send(.terminals(.worktreeStateTornDown(worktreeID: worktreeID)))
+
+      case .terminalEvent(.tabProgressDisplayChanged(_, let tabID, let display)):
+        return .send(
+          .terminals(.terminalTabs(.element(id: tabID, action: .progressDisplayChanged(display))))
+        )
+
+      case .terminals:
+        return .none
+
       case .terminalEvent(.surfacesClosed(let ids)):
         guard !ids.isEmpty else { return .none }
         if ids.count == 1, let id = ids.first {
@@ -973,6 +1003,9 @@ struct AppFeature {
       }
     }
     core
+    Scope(state: \.terminals, action: \.terminals) {
+      TerminalsFeature()
+    }
     Scope(state: \.agentPresence, action: \.agentPresence) {
       AgentPresenceFeature()
     }
@@ -990,6 +1023,16 @@ struct AppFeature {
     }
     .ifLet(\.$deeplinkInputConfirmation, action: \.deeplinkInputConfirmation) {
       DeeplinkInputConfirmationFeature()
+    }
+    Reduce { state, action in
+      // Cold-path gate. Without this, an agent storm fires
+      // `recomputeWorktreeMenuSnapshotIfChanged` hundreds of times per second
+      // (URL flatMap + 8-field Equatable diff each) only for the Equatable
+      // diff to find a no-op. The gate skips the recompute itself for
+      // actions that demonstrably can't change a snapshot input (#289).
+      guard action.affectsWorktreeMenuSnapshot else { return .none }
+      state.recomputeWorktreeMenuSnapshotIfChanged()
+      return .none
     }
   }
 
@@ -1035,16 +1078,31 @@ struct AppFeature {
     badgesEnabled: Bool
   ) -> Effect<Action> {
     let presence = state.agentPresence
-    let effects: [Effect<Action>] = rowIDs.compactMap { rowID in
-      guard let row = state.repositories.sidebarItems[id: rowID] else { return nil }
+    var effects: [Effect<Action>] = []
+    var affectedSurfaces: Set<UUID> = []
+    for rowID in rowIDs {
+      guard let row = state.repositories.sidebarItems[id: rowID] else { continue }
       let agents = presence.agents(across: row.surfaceIDs, badgesEnabled: badgesEnabled)
       let hasActivity = presence.hasActivity(in: row.surfaceIDs)
-      return .send(
-        .repositories(
-          .sidebarItems(
-            .element(id: rowID, action: .agentSnapshotChanged(agents, hasActivity: hasActivity))
+      effects.append(
+        .send(
+          .repositories(
+            .sidebarItems(
+              .element(id: rowID, action: .agentSnapshotChanged(agents, hasActivity: hasActivity))
+            )
           )
         )
+      )
+      affectedSurfaces.formUnion(row.surfaceIDs)
+    }
+    // Per-tab fanout: any tab containing an affected surface re-projects its
+    // agent snapshot. Tab leaves observe `state.agents` directly so per-tab
+    // mutations don't invalidate sibling tab leaves.
+    for tab in state.terminals.terminalTabs
+    where tab.surfaceIDs.contains(where: affectedSurfaces.contains) {
+      let agents = presence.agents(across: tab.surfaceIDs, badgesEnabled: badgesEnabled)
+      effects.append(
+        .send(.terminals(.terminalTabs(.element(id: tab.id, action: .agentSnapshotChanged(agents)))))
       )
     }
     return .merge(effects)

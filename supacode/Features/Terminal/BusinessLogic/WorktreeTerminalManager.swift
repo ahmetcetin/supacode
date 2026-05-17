@@ -326,6 +326,19 @@ final class WorktreeTerminalManager {
     // next mutation).
     lastEmittedProjections.removeAll()
     for id in states.keys { emitProjection(for: id) }
+    // Replay per-tab projections / stripe-progress displays for the same reason:
+    // a new subscriber needs the existing `terminalTabs[id:]` rows seeded so
+    // tab-bar leaves don't render empty until the next per-tab mutation.
+    for (worktreeID, state) in states {
+      for projection in state.currentTabProjections() {
+        continuation.yield(.tabProjectionChanged(worktreeID: worktreeID, projection))
+      }
+      for (tabID, display) in state.currentTabProgressDisplays() {
+        continuation.yield(
+          .tabProgressDisplayChanged(worktreeID: worktreeID, tabID: tabID, display: display)
+        )
+      }
+    }
     return stream
   }
 
@@ -403,6 +416,15 @@ final class WorktreeTerminalManager {
     state.onSetupScriptConsumed = { [weak self] in
       self?.emit(.setupScriptConsumed(worktreeID: worktree.id))
     }
+    state.onTabProjectionChanged = { [weak self] projection in
+      self?.emit(.tabProjectionChanged(worktreeID: worktree.id, projection))
+    }
+    state.onTabRemoved = { [weak self] tabID in
+      self?.emit(.tabRemoved(worktreeID: worktree.id, tabID: tabID))
+    }
+    state.onTabProgressDisplayChanged = { [weak self] tabID, display in
+      self?.emit(.tabProgressDisplayChanged(worktreeID: worktree.id, tabID: tabID, display: display))
+    }
     states[worktree.id] = state
     terminalLogger.info("Created terminal state for worktree \(worktree.id)")
     return state
@@ -447,13 +469,16 @@ final class WorktreeTerminalManager {
     for (id, state) in removed {
       saveLayoutSnapshot?(id, state.captureLayoutSnapshot())
       state.closeAllSurfaces()
+      // Signals the reducer to drop any orphan `terminalTabs` entries and
+      // recently-removed-tab records for this worktree so a same-session
+      // restore (snapshot reuses persisted tab UUIDs) starts clean.
+      emit(.worktreeStateTornDown(worktreeID: id))
     }
     if !removed.isEmpty {
       terminalLogger.info("Pruned \(removed.count) terminal state(s)")
     }
     states = states.filter { worktreeIDs.contains($0.key) }
     cancelPendingIdleHooks(forSurfaceIDs: prunedSurfaceIDs)
-    // Drop projection cache for pruned worktrees so a future re-add starts clean.
     for (id, _) in removed { lastEmittedProjections.removeValue(forKey: id) }
     emitNotificationIndicatorCountIfNeeded()
   }
@@ -515,10 +540,10 @@ final class WorktreeTerminalManager {
     for (worktreeID, state) in states {
       for notification in state.unreadNotifications() {
         if let bestCreatedAt, bestCreatedAt >= notification.createdAt { break }
-        guard let tabID = state.tabID(containing: notification.surfaceId) else {
+        guard let tabID = state.tabID(containing: notification.surfaceID) else {
           skippedClosedSurface = true
           terminalLogger.debug(
-            "latestUnreadNotificationLocation: skipping closed surface \(notification.surfaceId) "
+            "latestUnreadNotificationLocation: skipping closed surface \(notification.surfaceID) "
               + "in \(worktreeID); trying older unread."
           )
           continue
@@ -526,7 +551,7 @@ final class WorktreeTerminalManager {
         best = NotificationLocation(
           worktreeID: worktreeID,
           tabID: tabID,
-          surfaceID: notification.surfaceId,
+          surfaceID: notification.surfaceID,
           notificationID: notification.id,
         )
         bestCreatedAt = notification.createdAt

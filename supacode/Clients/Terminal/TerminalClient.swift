@@ -55,6 +55,20 @@ struct TerminalClient {
     /// Per-worktree projection emitted when surfaces / task-running / unseen / notifications drift.
     /// Routed by the parent into the matching `SidebarItemFeature` via the row's id.
     case worktreeProjectionChanged(Worktree.ID, WorktreeRowProjection)
+    /// Per-tab projection emitted when a tab's surfaces, focused pane, or unread
+    /// count drifts. Routed into the matching `TerminalTabFeature.State` via tab id.
+    case tabProjectionChanged(worktreeID: Worktree.ID, WorktreeTabProjection)
+    /// A tab was destroyed in the worktree state. Parent removes the matching
+    /// `TerminalTabFeature.State` from `terminalTabs`.
+    case tabRemoved(worktreeID: Worktree.ID, tabID: TerminalTabID)
+    /// The entire `WorktreeTerminalState` was torn down (worktree pruned).
+    /// Parent drops any orphan `terminalTabs` entries and removed-tab FIFO
+    /// records owned by this worktree so a fresh re-attach starts clean.
+    case worktreeStateTornDown(worktreeID: Worktree.ID)
+    /// A tab's stripe-progress display flipped. Routed into the matching
+    /// `TerminalTabFeature.State.progressDisplay` so the stripe recolors.
+    case tabProgressDisplayChanged(
+      worktreeID: Worktree.ID, tabID: TerminalTabID, display: TerminalTabProgressDisplay?)
     /// Forwarded from the terminal manager when surfaces close (single or bulk).
     /// `AppFeature` translates this into `agentPresence(.surfaceClosed/surfacesClosed)`.
     case surfacesClosed(Set<UUID>)

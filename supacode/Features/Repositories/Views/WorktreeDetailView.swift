@@ -6,6 +6,10 @@ import SupacodeSettingsFeature
 import SupacodeSettingsShared
 import SwiftUI
 
+#if DEBUG
+  private nonisolated let detailRenderLogger = SupaLogger("DetailRender")
+#endif
+
 struct WorktreeDetailView: View {
   @Bindable var store: StoreOf<AppFeature>
   let terminalManager: WorktreeTerminalManager
@@ -16,12 +20,18 @@ struct WorktreeDetailView: View {
   private var agentBadgesEnabled: Bool { settingsFile.global.agentPresenceBadgesEnabled }
 
   var body: some View {
-    detailBody(state: store.state)
+    #if DEBUG
+      let _ = Self._printChanges()
+      detailRenderLogger.info("WorktreeDetailView.body re-rendered")
+    #endif
+    return detailBody(state: store.state)
   }
 
   private func detailBody(state: AppFeature.State) -> some View {
     let repositories = state.repositories
-    let selectedRow = repositories.selectedRow(for: repositories.selectedWorktreeID)
+    // Reads the cached slice instead of `sidebarItems[id:]` so per-leaf agent
+    // / notification churn on the focused row doesn't invalidate this body.
+    let selectedRow = repositories.selectedWorktreeSlice
     let selectedWorktree = repositories.worktree(for: repositories.selectedWorktreeID)
     let selectedWorktreeSummaries = selectedWorktreeSummaries(from: repositories)
     let showsMultiSelectionSummary = shouldShowMultiSelectionSummary(
@@ -46,8 +56,11 @@ struct WorktreeDetailView: View {
     let openActionSelection = state.openActionSelection
     let repoScripts = state.repoScripts
     let globalScripts = state.globalScripts
-    let runningScriptIDs = state.runningScriptIDs
-    let notificationGroups = repositories.toolbarNotificationGroups(terminalManager: terminalManager)
+    // Source `runningScriptIDs` from the slice instead of `state.runningScriptIDs`
+    // so an unrelated `sidebarItems[id:].agents` mutation on the focused row
+    // doesn't re-publish this. Same field, observed through the projected slice.
+    let runningScriptIDs = Set(selectedRow?.runningScripts.ids ?? [])
+    let notificationGroups = repositories.toolbarNotificationGroupsCache
     let unseenNotificationWorktreeCount = notificationGroups.reduce(0) { count, repository in
       count + repository.unseenWorktreeCount
     }
@@ -55,6 +68,7 @@ struct WorktreeDetailView: View {
       repositories: repositories,
       loadingInfo: loadingInfo,
       selectedWorktree: selectedWorktree,
+      selectedSlice: selectedRow,
       selectedWorktreeSummaries: selectedWorktreeSummaries
     )
     .toolbar(removing: .title)
@@ -72,7 +86,7 @@ struct WorktreeDetailView: View {
         let toolbarState = WorktreeToolbarState(
           titleContent: titleContent,
           rootURL: selectedWorktree.repositoryRootURL,
-          kind: toolbarKind(for: selectedWorktree, repositories: repositories),
+          kind: toolbarKind(for: selectedWorktree, selectedRow: selectedRow),
           statusToast: repositories.statusToast,
           notificationGroups: notificationGroups,
           unseenNotificationWorktreeCount: unseenNotificationWorktreeCount,
@@ -84,6 +98,7 @@ struct WorktreeDetailView: View {
         )
         WorktreeToolbarContent(
           toolbarState: toolbarState,
+          terminalManager: terminalManager,
           onOpenWorktree: { action in
             store.send(.openWorktree(action))
           },
@@ -110,11 +125,14 @@ struct WorktreeDetailView: View {
       }
     }
     let hasRunningRunScript = state.hasRunningRunScript
-    let actions = makeFocusedActions(
+    let resolvedSelection: OpenWorktreeAction? =
+      hasActiveWorktree ? OpenWorktreeAction.availableSelection(store.openActionSelection) : nil
+    return applyFocusedActions(
+      content: content,
       hasActiveWorktree: hasActiveWorktree,
-      hasRunningRunScript: hasRunningRunScript
+      hasRunningRunScript: hasRunningRunScript,
+      resolvedSelection: resolvedSelection
     )
-    return applyFocusedActions(content: content, actions: actions)
   }
 
   private func selectedWorktreeSummaries(
@@ -184,6 +202,7 @@ struct WorktreeDetailView: View {
     repositories: RepositoriesFeature.State,
     loadingInfo: WorktreeLoadingInfo?,
     selectedWorktree: Worktree?,
+    selectedSlice: SelectedWorktreeSlice?,
     selectedWorktreeSummaries: [MultiSelectedWorktreeSummary]
   ) -> some View {
     Group {
@@ -199,16 +218,15 @@ struct WorktreeDetailView: View {
       } else if let loadingInfo {
         WorktreeLoadingView(info: loadingInfo)
       } else if let selectedWorktree {
-        let shouldRunSetupScript = repositories.sidebarItems[id: selectedWorktree.id]?.lifecycle == .pending
+        let shouldRunSetupScript = selectedSlice?.lifecycle == .pending
         let shouldFocusTerminal = repositories.shouldFocusTerminal(for: selectedWorktree.id)
         WorktreeTerminalTabsView(
           worktree: selectedWorktree,
           manager: terminalManager,
+          terminalsStore: store.scope(state: \.terminals, action: \.terminals),
           shouldRunSetupScript: shouldRunSetupScript,
           forceAutoFocus: shouldFocusTerminal,
-          createTab: { store.send(.newTerminal) },
-          agentPresence: store.state.agentPresence,
-          agentBadgesEnabled: agentBadgesEnabled
+          createTab: { store.send(.newTerminal) }
         )
         .id(selectedWorktree.id)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -229,53 +247,51 @@ struct WorktreeDetailView: View {
 
   private func applyFocusedActions<Content: View>(
     content: Content,
-    actions: FocusedActions
-  ) -> some View {
-    let resolvedSelection: OpenWorktreeAction? =
-      actions.openSelectedWorktree != nil
-      ? OpenWorktreeAction.availableSelection(store.openActionSelection) : nil
-    return
-      content
-      .focusedSceneValue(\.openSelectedWorktreeAction, actions.openSelectedWorktree)
-      .focusedSceneValue(\.revealInFinderAction, actions.revealInFinder)
-      .focusedSceneValue(\.openActionSelection, resolvedSelection)
-      .focusedSceneValue(\.newTerminalAction, actions.newTerminal)
-      .focusedValue(\.splitTerminalAction, actions.splitTerminal)
-      .focusedValue(\.closeTabAction, actions.closeTab)
-      .focusedValue(\.closeSurfaceAction, actions.closeSurface)
-      .focusedSceneValue(\.startSearchAction, actions.startSearch)
-      .focusedSceneValue(\.searchSelectionAction, actions.searchSelection)
-      .focusedSceneValue(\.navigateSearchNextAction, actions.navigateSearchNext)
-      .focusedSceneValue(\.navigateSearchPreviousAction, actions.navigateSearchPrevious)
-      .focusedSceneValue(\.endSearchAction, actions.endSearch)
-      .focusedSceneValue(\.runScriptAction, actions.runScript)
-      .focusedSceneValue(\.stopRunScriptAction, actions.stopRunScript)
-  }
-
-  private func makeFocusedActions(
     hasActiveWorktree: Bool,
-    hasRunningRunScript: Bool
-  ) -> FocusedActions {
-    func action(_ appAction: AppFeature.Action) -> (() -> Void)? {
-      hasActiveWorktree ? { store.send(appAction) } : nil
-    }
-    let splitTerminal: ((TerminalSplitMenuDirection) -> Void)? =
-      hasActiveWorktree ? { direction in store.send(.splitTerminal(direction)) } : nil
-    return FocusedActions(
-      openSelectedWorktree: action(.openSelectedWorktree),
-      revealInFinder: action(.revealInFinder),
-      newTerminal: action(.newTerminal),
-      splitTerminal: splitTerminal,
-      closeTab: action(.closeTab),
-      closeSurface: action(.closeSurface),
-      startSearch: action(.startSearch),
-      searchSelection: action(.searchSelection),
-      navigateSearchNext: action(.navigateSearchNext),
-      navigateSearchPrevious: action(.navigateSearchPrevious),
-      endSearch: action(.endSearch),
-      runScript: hasActiveWorktree ? { store.send(.runScript) } : nil,
-      stopRunScript: hasRunningRunScript ? { store.send(.stopRunScripts) } : nil,
-    )
+    hasRunningRunScript: Bool,
+    resolvedSelection: OpenWorktreeAction?
+  ) -> some View {
+    content
+      .focusedSceneAction(\.openSelectedWorktreeAction, enabled: hasActiveWorktree) {
+        store.send(.openSelectedWorktree)
+      }
+      .focusedSceneAction(\.revealInFinderAction, enabled: hasActiveWorktree) {
+        store.send(.revealInFinder)
+      }
+      .focusedSceneValue(\.openActionSelection, resolvedSelection)
+      .focusedSceneAction(\.newTerminalAction, enabled: hasActiveWorktree) {
+        store.send(.newTerminal)
+      }
+      .focusedAction(\.splitTerminalAction, enabled: hasActiveWorktree) { direction in
+        store.send(.splitTerminal(direction))
+      }
+      .focusedAction(\.closeTabAction, enabled: hasActiveWorktree) {
+        store.send(.closeTab)
+      }
+      .focusedAction(\.closeSurfaceAction, enabled: hasActiveWorktree) {
+        store.send(.closeSurface)
+      }
+      .focusedSceneAction(\.startSearchAction, enabled: hasActiveWorktree) {
+        store.send(.startSearch)
+      }
+      .focusedSceneAction(\.searchSelectionAction, enabled: hasActiveWorktree) {
+        store.send(.searchSelection)
+      }
+      .focusedSceneAction(\.navigateSearchNextAction, enabled: hasActiveWorktree) {
+        store.send(.navigateSearchNext)
+      }
+      .focusedSceneAction(\.navigateSearchPreviousAction, enabled: hasActiveWorktree) {
+        store.send(.navigateSearchPrevious)
+      }
+      .focusedSceneAction(\.endSearchAction, enabled: hasActiveWorktree) {
+        store.send(.endSearch)
+      }
+      .focusedSceneAction(\.runScriptAction, enabled: hasActiveWorktree) {
+        store.send(.runScript)
+      }
+      .focusedSceneAction(\.stopRunScriptAction, enabled: hasRunningRunScript) {
+        store.send(.stopRunScripts)
+      }
   }
 
   private func selectToolbarNotification(
@@ -284,7 +300,7 @@ struct WorktreeDetailView: View {
   ) {
     store.send(.repositories(.selectWorktree(worktreeID)))
     if let terminalState = terminalManager.stateIfExists(for: worktreeID) {
-      _ = terminalState.focusSurface(id: notification.surfaceId)
+      _ = terminalState.focusSurface(id: notification.surfaceID)
     }
   }
 
@@ -294,22 +310,6 @@ struct WorktreeDetailView: View {
         terminalManager.stateIfExists(for: worktreeGroup.id)?.dismissAllNotifications()
       }
     }
-  }
-
-  private struct FocusedActions {
-    let openSelectedWorktree: (() -> Void)?
-    let revealInFinder: (() -> Void)?
-    let newTerminal: (() -> Void)?
-    let splitTerminal: ((TerminalSplitMenuDirection) -> Void)?
-    let closeTab: (() -> Void)?
-    let closeSurface: (() -> Void)?
-    let startSearch: (() -> Void)?
-    let searchSelection: (() -> Void)?
-    let navigateSearchNext: (() -> Void)?
-    let navigateSearchPrevious: (() -> Void)?
-    let endSearch: (() -> Void)?
-    let runScript: (() -> Void)?
-    let stopRunScript: (() -> Void)?
   }
 
   fileprivate struct ScriptMenuIdentity: Hashable {
@@ -409,6 +409,7 @@ struct WorktreeDetailView: View {
 
   fileprivate struct WorktreeToolbarContent: ToolbarContent {
     let toolbarState: WorktreeToolbarState
+    let terminalManager: WorktreeTerminalManager
     let onOpenWorktree: (OpenWorktreeAction) -> Void
     let onOpenActionSelectionChanged: (OpenWorktreeAction) -> Void
     let onRevealInFinder: () -> Void
@@ -423,7 +424,10 @@ struct WorktreeDetailView: View {
 
     var body: some ToolbarContent {
       ToolbarItem(placement: .navigation) {
-        WorktreeToolbarTitleView(content: toolbarState.titleContent)
+        WorktreeToolbarTitleView(
+          content: toolbarState.titleContent,
+          terminalManager: terminalManager
+        )
       }
       .sharedBackgroundVisibility(.hidden)
 
@@ -516,7 +520,7 @@ struct WorktreeDetailView: View {
 
   static func makeToolbarTitleContent(
     selectedWorktree: Worktree,
-    selectedRow: SidebarItemFeature.State?,
+    selectedRow: SelectedWorktreeSlice?,
     repositories: RepositoriesFeature.State,
     hideSubtitleOnMatch: Bool
   ) -> WorktreeToolbarTitleContent {
@@ -562,22 +566,21 @@ struct WorktreeDetailView: View {
 
   private func toolbarKind(
     for selectedWorktree: Worktree,
-    repositories: RepositoriesFeature.State
+    selectedRow: SelectedWorktreeSlice?
   ) -> WorktreeToolbarState.Kind {
-    let selectedRow = repositories.selectedRow(for: selectedWorktree.id)
     guard selectedRow?.isFolder != true else { return .folder }
-    guard let pullRequest = repositories.sidebarItems[id: selectedWorktree.id]?.pullRequest else {
+    guard let pullRequest = selectedRow?.pullRequest else {
       return .git(pullRequest: nil)
     }
     // Only surface the PR when its head branch matches the current
-    // worktree — otherwise stale info sticks around after a rename
+    // worktree, otherwise stale info sticks around after a rename
     // or branch switch.
     let matches = pullRequest.headRefName == nil || pullRequest.headRefName == selectedWorktree.name
     return .git(pullRequest: matches ? pullRequest : nil)
   }
 
   private func loadingInfo(
-    for selectedRow: SidebarItemFeature.State?,
+    for selectedRow: SelectedWorktreeSlice?,
     selectedWorktreeID: Worktree.ID?,
     repositories: RepositoriesFeature.State
   ) -> WorktreeLoadingInfo? {
@@ -1034,6 +1037,7 @@ private struct WorktreeToolbarPreview: View {
     .toolbar {
       WorktreeDetailView.WorktreeToolbarContent(
         toolbarState: toolbarState,
+        terminalManager: WorktreeTerminalManager(runtime: GhosttyRuntime()),
         onOpenWorktree: { _ in },
         onOpenActionSelectionChanged: { _ in },
         onRevealInFinder: {},

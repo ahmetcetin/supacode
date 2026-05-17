@@ -1,41 +1,28 @@
 import SupacodeSettingsShared
 import SwiftUI
 
+/// Background fill + inactive-tab bottom separator. The top stripe is moved
+/// to a `TerminalTabView` overlay so it can paint over adjacent dividers
+/// without being clipped by the tab's `clipShape`.
 struct TerminalTabBackground: View {
   var isActive: Bool
   var isHovering: Bool
   var isPressing: Bool
   var isDragging: Bool
-  var tintColor: RepositoryColor?
 
   @Environment(\.surfaceChromeAppearance)
   private var chromeAppearance
+  @Environment(\.pixelLength)
+  private var pixelLength
 
   var body: some View {
     Color.clear
-      .overlay(alignment: .top) {
-        Rectangle()
-          .fill(tintColor?.color ?? .accentColor)
-          .frame(height: TerminalTabBarMetrics.activeIndicatorHeight)
-          .opacity(stripeOpacity)
-      }
       .overlay(alignment: .bottom) {
         if !isActive {
           Rectangle()
             .fill(chromeAppearance.overlayTint.opacity(chromeAppearance.separatorOpacity))
-            .frame(height: 1)
+            .frame(height: pixelLength)
         }
       }
-  }
-
-  private var stripeOpacity: Double {
-    guard !isActive else { return 1 }
-    guard tintColor != nil else { return 0 }
-    // Mirror `TerminalTabView.contentOpacity` so a press/drag on a tinted
-    // inactive tab snaps the stripe to full at the same time as the content.
-    if isPressing || isDragging { return 1 }
-    return isHovering
-      ? TerminalTabBarMetrics.inactiveContentOpacityHover
-      : TerminalTabBarMetrics.inactiveContentOpacityIdle
   }
 }
