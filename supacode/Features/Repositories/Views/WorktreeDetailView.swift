@@ -14,9 +14,19 @@ struct WorktreeDetailView: View {
   @Bindable var store: StoreOf<AppFeature>
   let terminalManager: WorktreeTerminalManager
   @Shared(.appStorage("worktreeRowHideSubtitleOnMatch")) private var hideSubtitleOnMatch = true
+  @Shared(.appStorage("fileExplorerVisible")) private var isFileExplorerVisible = false
   @Shared(.settingsFile) private var settingsFile: SettingsFile
 
   private var agentBadgesEnabled: Bool { settingsFile.global.agentPresenceBadgesEnabled }
+
+  /// Flip the file explorer panel, animating the dock in/out. Mutating the
+  /// `@Shared` here (rather than via the store) matches the sidebar-visibility
+  /// toggle in `ContentView`; the panel is view-local UI, not app state.
+  private func toggleFileExplorer() {
+    withAnimation(.easeOut(duration: 0.2)) {
+      $isFileExplorerVisible.withLock { $0.toggle() }
+    }
+  }
 
   var body: some View {
     #if DEBUG
@@ -96,6 +106,8 @@ struct WorktreeDetailView: View {
           toolbarState: toolbarState,
           terminalManager: terminalManager,
           repositoriesStore: store.scope(state: \.repositories, action: \.repositories),
+          isFileExplorerVisible: isFileExplorerVisible,
+          onToggleFileExplorer: toggleFileExplorer,
           onOpenWorktree: { action in
             store.send(.openWorktree(action))
           },
@@ -237,20 +249,28 @@ struct WorktreeDetailView: View {
       } else if let selectedWorktree {
         let shouldRunSetupScript = selectedSlice?.lifecycle == .pending
         let shouldFocusTerminal = repositories.shouldFocusTerminal(for: selectedWorktree.id)
-        WorktreeTerminalTabsView(
-          worktree: selectedWorktree,
-          manager: terminalManager,
-          terminalsStore: store.scope(state: \.terminals, action: \.terminals),
-          shouldRunSetupScript: shouldRunSetupScript,
-          forceAutoFocus: shouldFocusTerminal,
-          createTab: { store.send(.newTerminal) }
-        )
-        .id(selectedWorktree.id)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea(.container, edges: .bottom)
-        .onAppear {
-          if shouldFocusTerminal {
-            store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
+        HStack(spacing: 0) {
+          // Local worktrees only: a remote worktree has no on-disk path to browse.
+          if isFileExplorerVisible, let explorerRoot = selectedWorktree.localWorkingDirectory {
+            FileExplorerPanel(rootURL: explorerRoot, onClose: toggleFileExplorer)
+              .id(selectedWorktree.id)
+              .transition(.move(edge: .leading).combined(with: .opacity))
+          }
+          WorktreeTerminalTabsView(
+            worktree: selectedWorktree,
+            manager: terminalManager,
+            terminalsStore: store.scope(state: \.terminals, action: \.terminals),
+            shouldRunSetupScript: shouldRunSetupScript,
+            forceAutoFocus: shouldFocusTerminal,
+            createTab: { store.send(.newTerminal) }
+          )
+          .id(selectedWorktree.id)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .ignoresSafeArea(.container, edges: .bottom)
+          .onAppear {
+            if shouldFocusTerminal {
+              store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
+            }
           }
         }
       } else if !repositories.isInitialLoadComplete {
@@ -270,6 +290,9 @@ struct WorktreeDetailView: View {
     resolvedSelection: OpenWorktreeAction?
   ) -> some View {
     content
+      .focusedSceneAction(\.toggleFileExplorerAction, enabled: canOpenLocally) {
+        toggleFileExplorer()
+      }
       .focusedSceneAction(\.openSelectedWorktreeAction, enabled: canOpenLocally) {
         store.send(.openSelectedWorktree)
       }
@@ -451,6 +474,8 @@ struct WorktreeDetailView: View {
     let toolbarState: WorktreeToolbarState
     let terminalManager: WorktreeTerminalManager
     let repositoriesStore: StoreOf<RepositoriesFeature>?
+    let isFileExplorerVisible: Bool
+    let onToggleFileExplorer: () -> Void
     let onOpenWorktree: (OpenWorktreeAction) -> Void
     let onOpenActionSelectionChanged: (OpenWorktreeAction) -> Void
     let onRevealInFinder: () -> Void
@@ -463,6 +488,18 @@ struct WorktreeDetailView: View {
     let onManageGlobalScripts: () -> Void
 
     var body: some ToolbarContent {
+      ToolbarItem(placement: .navigation) {
+        Button(action: onToggleFileExplorer) {
+          Image(systemName: "folder")
+            .symbolVariant(isFileExplorerVisible ? .fill : .none)
+        }
+        // Local paths only — a remote worktree has nothing on disk to browse.
+        .disabled(toolbarState.isRemote)
+        .help(
+          "Toggle File Explorer (\(WorktreeDetailView.resolveShortcutDisplay(for: AppShortcuts.toggleFileExplorer)))"
+        )
+      }
+
       ToolbarItem(placement: .navigation) {
         WorktreeToolbarTitleView(
           content: toolbarState.titleContent,
@@ -1133,6 +1170,8 @@ private struct WorktreeToolbarPreview: View {
         toolbarState: toolbarState,
         terminalManager: WorktreeTerminalManager(runtime: GhosttyRuntime()),
         repositoriesStore: nil,
+        isFileExplorerVisible: false,
+        onToggleFileExplorer: {},
         onOpenWorktree: { _ in },
         onOpenActionSelectionChanged: { _ in },
         onRevealInFinder: {},

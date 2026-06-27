@@ -5,6 +5,7 @@ import SwiftUI
 struct SidebarCommands: Commands {
   @FocusedValue(\.toggleLeftSidebarAction) private var toggleLeftSidebarAction
   @FocusedValue(\.revealInSidebarAction) private var revealInSidebarAction
+  @FocusedValue(\.toggleFileExplorerAction) private var toggleFileExplorerAction
   @Shared(.settingsFile) private var settingsFile
   @Shared(.appStorage("worktreeRowHideSubtitleOnMatch")) private var hideSubtitleOnMatch = true
   @Shared(.sidebarNestWorktreesByBranch) private var nestWorktreesByBranch: Bool
@@ -70,6 +71,7 @@ struct SidebarCommands: Commands {
     let overrides = settingsFile.global.shortcutOverrides
     let toggleLeftSidebar = AppShortcuts.toggleLeftSidebar.effective(from: overrides)
     let revealInSidebar = AppShortcuts.revealInSidebar.effective(from: overrides)
+    let toggleFileExplorer = AppShortcuts.toggleFileExplorer.effective(from: overrides)
     CommandGroup(replacing: .sidebar) {
       Button("Toggle Left Sidebar", systemImage: "sidebar.leading") {
         toggleLeftSidebarAction?()
@@ -77,6 +79,12 @@ struct SidebarCommands: Commands {
       .appKeyboardShortcut(toggleLeftSidebar)
       .help("Toggle Left Sidebar (\(toggleLeftSidebar?.display ?? "none"))")
       .disabled(toggleLeftSidebarAction?.isEnabled != true)
+      Button("Toggle File Explorer", systemImage: "folder") {
+        toggleFileExplorerAction?()
+      }
+      .appKeyboardShortcut(toggleFileExplorer)
+      .help("Toggle File Explorer (\(toggleFileExplorer?.display ?? "none"))")
+      .disabled(toggleFileExplorerAction?.isEnabled != true)
       Button("Reveal in Sidebar") {
         revealInSidebarAction?()
       }
@@ -103,6 +111,10 @@ private struct RevealInSidebarActionKey: FocusedValueKey {
   typealias Value = FocusedAction<Void>
 }
 
+private struct ToggleFileExplorerActionKey: FocusedValueKey {
+  typealias Value = FocusedAction<Void>
+}
+
 extension FocusedValues {
   var toggleLeftSidebarAction: FocusedAction<Void>? {
     get { self[ToggleLeftSidebarActionKey.self] }
@@ -112,5 +124,10 @@ extension FocusedValues {
   var revealInSidebarAction: FocusedAction<Void>? {
     get { self[RevealInSidebarActionKey.self] }
     set { self[RevealInSidebarActionKey.self] = newValue }
+  }
+
+  var toggleFileExplorerAction: FocusedAction<Void>? {
+    get { self[ToggleFileExplorerActionKey.self] }
+    set { self[ToggleFileExplorerActionKey.self] = newValue }
   }
 }
