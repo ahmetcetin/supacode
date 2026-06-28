@@ -32,6 +32,11 @@ final class FileExplorerModel {
     }
   }
 
+  /// Invoked when a (non-directory) file is selected, so the parent can open it
+  /// in the file viewer pane. `@ObservationIgnored` — it's a wiring callback, not
+  /// rendered state.
+  @ObservationIgnored var onOpenFile: ((URL) -> Void)?
+
   private var rootChildren: [FileExplorerNode] = []
   private var childrenByDirectory: [URL: [FileExplorerNode]] = [:]
   private var expanded: Set<URL> = []
@@ -74,11 +79,14 @@ final class FileExplorerModel {
     rebuildRows()
   }
 
-  /// Primary action for a row: directories expand/collapse, files just select.
+  /// Primary action for a row: directories expand/collapse, files open in the
+  /// viewer pane.
   func activate(_ node: FileExplorerNode) {
     selectedURL = node.url
     if node.isDirectory {
       toggleExpansion(node)
+    } else {
+      onOpenFile?(node.url)
     }
   }
 

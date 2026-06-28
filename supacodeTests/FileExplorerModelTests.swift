@@ -31,7 +31,10 @@ struct FileExplorerModelTests {
   @Test func updateRootSwitchesToNewDirectoryContents() throws {
     let dirA = try Self.makeTempDir(files: ["a1.txt", "a2.txt"])
     let dirB = try Self.makeTempDir(files: ["b1.txt"])
-    defer { try? FileManager.default.removeItem(at: dirA); try? FileManager.default.removeItem(at: dirB) }
+    defer {
+      try? FileManager.default.removeItem(at: dirA)
+      try? FileManager.default.removeItem(at: dirB)
+    }
 
     let model = FileExplorerModel(rootURL: dirA)
     #expect(model.rows.map(\.node.name) == ["a1.txt", "a2.txt"])
@@ -44,7 +47,10 @@ struct FileExplorerModelTests {
   @Test func updateRootClearsExpansionAndSelection() throws {
     let dirA = try Self.makeTempDir(files: ["root.txt"], subdir: (name: "sub", child: "inner.txt"))
     let dirB = try Self.makeTempDir(files: ["b1.txt"])
-    defer { try? FileManager.default.removeItem(at: dirA); try? FileManager.default.removeItem(at: dirB) }
+    defer {
+      try? FileManager.default.removeItem(at: dirA)
+      try? FileManager.default.removeItem(at: dirB)
+    }
 
     let model = FileExplorerModel(rootURL: dirA)
     // Expand the directory node the model actually listed (its URL representation

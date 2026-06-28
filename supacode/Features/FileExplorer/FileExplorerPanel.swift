@@ -20,10 +20,12 @@ struct FileExplorerPanel: View {
   private static let minWidth: CGFloat = 180
   private static let maxWidth: CGFloat = 520
 
-  init(rootURL: URL, onClose: @escaping () -> Void) {
+  init(rootURL: URL, onOpenFile: ((URL) -> Void)? = nil, onClose: @escaping () -> Void) {
     self.rootURL = rootURL
     self.onClose = onClose
-    _model = State(initialValue: FileExplorerModel(rootURL: rootURL))
+    let model = FileExplorerModel(rootURL: rootURL)
+    model.onOpenFile = onOpenFile
+    _model = State(initialValue: model)
   }
 
   var body: some View {
@@ -53,6 +55,7 @@ struct FileExplorerPanel: View {
       Image(systemName: "folder.fill")
         .foregroundStyle(.tint)
         .imageScale(.small)
+        .accessibilityHidden(true)
       Text(model.rootURL.lastPathComponent)
         .font(.headline)
         .lineLimit(1)
@@ -62,6 +65,7 @@ struct FileExplorerPanel: View {
         model.showsHiddenFiles.toggle()
       } label: {
         Image(systemName: model.showsHiddenFiles ? "eye" : "eye.slash")
+          .accessibilityLabel(model.showsHiddenFiles ? "Hide Hidden Files" : "Show Hidden Files")
       }
       .buttonStyle(.borderless)
       .help(model.showsHiddenFiles ? "Hide Hidden Files" : "Show Hidden Files")
@@ -69,11 +73,13 @@ struct FileExplorerPanel: View {
         model.reload()
       } label: {
         Image(systemName: "arrow.clockwise")
+          .accessibilityLabel("Refresh File Explorer")
       }
       .buttonStyle(.borderless)
       .help("Refresh File Explorer")
       Button(action: onClose) {
         Image(systemName: "xmark")
+          .accessibilityLabel("Close File Explorer")
       }
       .buttonStyle(.borderless)
       .help("Close File Explorer (\(WorktreeDetailView.resolveShortcutDisplay(for: AppShortcuts.toggleFileExplorer)))")
@@ -153,6 +159,7 @@ private struct FileExplorerRowView: View {
         .foregroundStyle(node.isDirectory ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
         .frame(width: 16)
         .imageScale(.small)
+        .accessibilityHidden(true)
       Text(node.name)
         .lineLimit(1)
         .truncationMode(.middle)
@@ -190,6 +197,8 @@ private struct FileExplorerRowView: View {
       Button("Copy Relative Path") { model.copyRelativePath(node) }
     }
     .font(.callout)
+    .accessibilityElement(children: .combine)
+    .accessibilityAddTraits(.isButton)
   }
 
   @ViewBuilder
@@ -200,6 +209,7 @@ private struct FileExplorerRowView: View {
         .foregroundStyle(.secondary)
         .rotationEffect(.degrees(row.isExpanded ? 90 : 0))
         .frame(width: 12)
+        .accessibilityHidden(true)
     } else {
       Color.clear.frame(width: 12)
     }

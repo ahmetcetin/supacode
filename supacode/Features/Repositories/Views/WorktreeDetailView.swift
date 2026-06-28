@@ -16,6 +16,7 @@ struct WorktreeDetailView: View {
   @Shared(.appStorage("worktreeRowHideSubtitleOnMatch")) private var hideSubtitleOnMatch = true
   @Shared(.appStorage("fileExplorerVisible")) private var isFileExplorerVisible = false
   @Shared(.settingsFile) private var settingsFile: SettingsFile
+  @State private var fileViewer = FileViewerModel()
 
   private var agentBadgesEnabled: Bool { settingsFile.global.agentPresenceBadgesEnabled }
 
@@ -256,6 +257,7 @@ struct WorktreeDetailView: View {
           if isFileExplorerVisible, let fallbackRoot = selectedWorktree.localWorkingDirectory {
             FileExplorerPanel(
               rootURL: terminalManager.focusedSurfacePwd(for: selectedWorktree.id) ?? fallbackRoot,
+              onOpenFile: { fileViewer.open($0) },
               onClose: toggleFileExplorer
             )
             .id(selectedWorktree.id)
@@ -277,7 +279,14 @@ struct WorktreeDetailView: View {
               store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
             }
           }
+          if fileViewer.hasFile {
+            FileViewerPanel(model: fileViewer, onClose: { fileViewer.close() })
+              .transition(.move(edge: .trailing).combined(with: .opacity))
+          }
         }
+        // A file open in the viewer belongs to the previous worktree's tree;
+        // close it when the selection changes so it never shows a stale file.
+        .onChange(of: selectedWorktree.id) { _, _ in fileViewer.close() }
       } else if !repositories.isInitialLoadComplete {
         DetailPlaceholderView()
       } else {
