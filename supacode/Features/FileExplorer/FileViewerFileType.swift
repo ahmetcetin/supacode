@@ -35,7 +35,9 @@ enum FileViewerFileType {
 
   /// Whether `url` should render as markdown. Extension wins; then a known
   /// extension-less filename (LICENSE, README…); then a light content sniff so a
-  /// `.txt` that is clearly markdown still renders.
+  /// `.txt` that is clearly markdown still renders. The sniff is skipped for
+  /// dotfiles and recognized code/config files, whose `#` comments would
+  /// otherwise be misread as markdown headings (e.g. `.gitignore`, `Makefile`).
   static func isMarkdown(url: URL, sample: String) -> Bool {
     let ext = url.pathExtension.lowercased()
     if markdownExtensions.contains(ext) { return true }
@@ -43,20 +45,25 @@ enum FileViewerFileType {
       let stem = url.deletingPathExtension().lastPathComponent.lowercased()
       if markdownFilenameStems.contains(stem) { return true }
     }
+    // `.gitignore`, `.env`, … are config, not markdown.
+    if url.lastPathComponent.hasPrefix(".") { return false }
+    // Makefile, *.sh, *.py, *.yaml, … — a recognized language uses `#` for
+    // comments, not headings.
+    if highlightrLanguage(for: url) != nil { return false }
     return contentLooksLikeMarkdown(sample)
   }
 
-  /// Conservative content heuristic: an ATX heading (`# `…`###### `) or a fenced
-  /// code block near the top. Deliberately narrow so plain prose isn't misread
-  /// as markdown.
+  /// Conservative content heuristic: the first non-empty line is an ATX heading
+  /// (`# `…`###### `) or a fenced code block. Looking only at the first line keeps
+  /// a stray `#` comment deeper in a file from being misread as markdown.
   private static func contentLooksLikeMarkdown(_ sample: String) -> Bool {
-    for rawLine in sample.split(separator: "\n", maxSplits: 40, omittingEmptySubsequences: true).prefix(40) {
+    for rawLine in sample.split(separator: "\n", omittingEmptySubsequences: true).prefix(40) {
       let line = rawLine.trimmingCharacters(in: .whitespaces)
+      if line.isEmpty { continue }
       if line.hasPrefix("```") || line.hasPrefix("~~~") { return true }
-      if let hash = line.firstIndex(where: { $0 != "#" }), line.first == "#" {
-        let hashes = line.distance(from: line.startIndex, to: hash)
-        if (1...6).contains(hashes), line[hash] == " " { return true }
-      }
+      guard line.first == "#", let nonHash = line.firstIndex(where: { $0 != "#" }) else { return false }
+      let hashes = line.distance(from: line.startIndex, to: nonHash)
+      return (1...6).contains(hashes) && line[nonHash] == " "
     }
     return false
   }

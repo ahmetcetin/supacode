@@ -36,6 +36,17 @@ struct FileViewerFileTypeTests {
     #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/notes.txt"), sample: "#notaheading"))
   }
 
+  @Test func hashCommentsInCodeAndConfigAreNotMarkdown() {
+    // `#` is a comment in these, not an ATX heading — must not render as markdown.
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/.gitignore"), sample: "# Logs\n*.log"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/.env"), sample: "# secrets\nKEY=1"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/Makefile"), sample: "# build\nall:\n\tcc"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/Dockerfile"), sample: "# base\nFROM x"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/script.py"), sample: "# comment\nprint()"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/conf.yaml"), sample: "# config\nkey: val"))
+    #expect(!FileViewerFileType.isMarkdown(url: URL(filePath: "/r/run.sh"), sample: "#!/bin/bash\n# go\necho hi"))
+  }
+
   @Test func highlightrLanguageMapping() {
     #expect(FileViewerFileType.highlightrLanguage(for: URL(filePath: "/r/a.swift")) == "swift")
     #expect(FileViewerFileType.highlightrLanguage(for: URL(filePath: "/r/a.tsx")) == "typescript")
