@@ -32,12 +32,16 @@ struct SidebarView: View {
       }
     let openRepo = AppShortcuts.openRepository.effective(from: settingsFile.global.shortcutOverrides)
 
-    return SidebarListView(
-      store: store,
-      terminalManager: terminalManager
-    )
-    .safeAreaInset(edge: .top, spacing: 0) {
+    return VStack(spacing: 0) {
+      // Above the List (not a `.safeAreaInset` over it) so the switcher sits on
+      // the sidebar column's own material instead of painting a mismatched one,
+      // and the list never scrolls under it.
       WorkspaceSwitcherView(store: store)
+      Divider()
+      SidebarListView(
+        store: store,
+        terminalManager: terminalManager
+      )
     }
     .toolbar {
       ToolbarItem(placement: .primaryAction) {

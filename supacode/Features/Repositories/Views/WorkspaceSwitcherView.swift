@@ -100,8 +100,9 @@ struct WorkspaceSwitcherView: View {
     .menuIndicator(.hidden)
     .padding(.horizontal, 10)
     .padding(.vertical, 6)
-    .background(.bar)
-    .overlay(alignment: .bottom) { Divider() }
+    // No explicit background: the switcher sits on the sidebar column's own
+    // material (it lives in a VStack above the List in `SidebarView`), so it
+    // matches the rows below instead of painting a mismatched material.
     .help("Switch, create, rename, or delete a workspace to filter the projects shown in the sidebar")
     .sheet(item: $prompt) { prompt in
       WorkspaceNamePromptView(
