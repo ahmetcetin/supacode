@@ -103,10 +103,17 @@ struct WorkspaceSwitcherView: View {
     .background(.bar)
     .overlay(alignment: .bottom) { Divider() }
     .help("Switch, create, rename, or delete a workspace to filter the projects shown in the sidebar")
-    .alert(prompt?.title ?? "", isPresented: promptPresented, presenting: prompt) { prompt in
-      TextField("Name", text: $promptText)
-      Button(prompt.confirmTitle) { submit(prompt) }
-      Button("Cancel", role: .cancel) {}
+    .sheet(item: $prompt) { prompt in
+      WorkspaceNamePromptView(
+        title: prompt.title,
+        confirmTitle: prompt.confirmTitle,
+        text: $promptText,
+        onConfirm: {
+          submit(prompt)
+          self.prompt = nil
+        },
+        onCancel: { self.prompt = nil }
+      )
     }
   }
 
@@ -114,15 +121,6 @@ struct WorkspaceSwitcherView: View {
     Binding(
       get: { store.state.sidebar.activeWorkspaceID },
       set: { store.send(.setActiveWorkspace($0)) }
-    )
-  }
-
-  private var promptPresented: Binding<Bool> {
-    Binding(
-      get: { prompt != nil },
-      set: { isPresented in
-        if !isPresented { prompt = nil }
-      }
     )
   }
 
@@ -174,5 +172,48 @@ struct WorkspaceAssignmentMenu: View {
       get: { store.state.sidebar.sections[repositoryID]?.workspaceID },
       set: { store.send(.assignRepositoryToWorkspace(repositoryID: repositoryID, workspaceID: $0)) }
     )
+  }
+}
+
+/// Compact modal for entering a workspace name (create / rename). Presented as
+/// a sheet rather than `.alert` so the text field reliably takes keyboard focus
+/// on open and Return / Escape map to confirm / cancel.
+private struct WorkspaceNamePromptView: View {
+  let title: String
+  let confirmTitle: String
+  @Binding var text: String
+  let onConfirm: () -> Void
+  let onCancel: () -> Void
+  @FocusState private var fieldFocused: Bool
+
+  private var trimmedIsEmpty: Bool {
+    text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      Text(title)
+        .font(.headline)
+      TextField("Workspace Name", text: $text)
+        .textFieldStyle(.roundedBorder)
+        .focused($fieldFocused)
+        .frame(minWidth: 240)
+      HStack {
+        Spacer()
+        Button("Cancel", role: .cancel, action: onCancel)
+          .keyboardShortcut(.cancelAction)
+        Button(confirmTitle) {
+          guard !trimmedIsEmpty else { return }
+          onConfirm()
+        }
+        .keyboardShortcut(.defaultAction)
+        .buttonStyle(.borderedProminent)
+        .disabled(trimmedIsEmpty)
+      }
+    }
+    .padding(20)
+    // Focus the field as soon as the sheet appears so the user can type the
+    // name immediately (Return confirms, Escape cancels via the buttons above).
+    .onAppear { fieldFocused = true }
   }
 }
