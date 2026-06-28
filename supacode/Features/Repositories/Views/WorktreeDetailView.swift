@@ -250,10 +250,30 @@ struct WorktreeDetailView: View {
       } else if let selectedWorktree {
         let shouldRunSetupScript = selectedSlice?.lifecycle == .pending
         let shouldFocusTerminal = repositories.shouldFocusTerminal(for: selectedWorktree.id)
-        HStack(spacing: 0) {
-          // Local worktrees only: a remote worktree has no on-disk path to browse.
-          // Root follows the active terminal's pwd (OSC 7) and falls back to the
-          // worktree dir until the shell reports one.
+        WorktreeTerminalTabsView(
+          worktree: selectedWorktree,
+          manager: terminalManager,
+          terminalsStore: store.scope(state: \.terminals, action: \.terminals),
+          shouldRunSetupScript: shouldRunSetupScript,
+          forceAutoFocus: shouldFocusTerminal,
+          createTab: { store.send(.newTerminal) }
+        )
+        .id(selectedWorktree.id)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .ignoresSafeArea(.container, edges: .bottom)
+        .onAppear {
+          if shouldFocusTerminal {
+            store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
+          }
+        }
+        // The explorer (left) and viewer (right) dock as safe-area insets rather
+        // than wrapping the terminal in an `HStack`, so the terminal block above
+        // stays byte-identical to upstream and this hot view merge-stays clean
+        // (see "Minimizing Upstream Merge Conflicts" in AGENTS.md). File explorer
+        // is local-worktrees-only — a remote worktree has no on-disk path to
+        // browse; its root follows the active terminal's pwd (OSC 7) and falls
+        // back to the worktree dir until the shell reports one.
+        .safeAreaInset(edge: .leading, spacing: 0) {
           if isFileExplorerVisible, let fallbackRoot = selectedWorktree.localWorkingDirectory {
             FileExplorerPanel(
               rootURL: terminalManager.focusedSurfacePwd(for: selectedWorktree.id) ?? fallbackRoot,
@@ -263,22 +283,8 @@ struct WorktreeDetailView: View {
             .id(selectedWorktree.id)
             .transition(.move(edge: .leading).combined(with: .opacity))
           }
-          WorktreeTerminalTabsView(
-            worktree: selectedWorktree,
-            manager: terminalManager,
-            terminalsStore: store.scope(state: \.terminals, action: \.terminals),
-            shouldRunSetupScript: shouldRunSetupScript,
-            forceAutoFocus: shouldFocusTerminal,
-            createTab: { store.send(.newTerminal) }
-          )
-          .id(selectedWorktree.id)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .ignoresSafeArea(.container, edges: .bottom)
-          .onAppear {
-            if shouldFocusTerminal {
-              store.send(.repositories(.consumeTerminalFocus(selectedWorktree.id)))
-            }
-          }
+        }
+        .safeAreaInset(edge: .trailing, spacing: 0) {
           if fileViewer.hasFile {
             FileViewerPanel(model: fileViewer, onClose: { fileViewer.close() })
               .transition(.move(edge: .trailing).combined(with: .opacity))

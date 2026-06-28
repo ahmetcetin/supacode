@@ -149,6 +149,20 @@ Reducer ← .repositories(.worktreeInfoEvent(Event)) ← AsyncStream<Event>
 - Before you go on your task, check the current git branch name, if it's something generic like an animal name, name it accordingly. Do not do this for main branch
 - After implementing an execplan, always submit a PR if you're not in the main branch
 
+## Minimizing Upstream Merge Conflicts
+
+This repo is a fork that periodically syncs from upstream `supabitapp/supacode` (`git fetch upstream`, sync against `upstream/main`). Every local change must be written to survive an upstream rebase/merge with the smallest possible conflict surface. Order of preference for any new feature:
+
+1. **New files over edits.** A new file at a path upstream doesn't use never conflicts. Put feature code in its own files/folder (e.g. `Features/FileExplorer/`). This is the only way to get a truly zero-conflict change.
+2. **Append, don't restructure.** When you must touch an upstream file, add lines at the tail of a list / end of a type / after an existing call — never re-indent or wrap an existing block. Re-indenting upstream code (e.g. wrapping a view in a new `HStack`/`VStack`) turns every upstream edit to the inner lines into a conflict. Prefer appended SwiftUI modifiers (`.safeAreaInset`, `.overlay`, `.modifier`) on an existing view over wrapping it.
+3. **Move extensible plumbing into your own files.** `extension FocusedValues`, `extension` methods / computed props, `FocusedValueKey` conformances, etc. are cross-file extensible — define them in a feature-owned file, not inside the upstream type's file. (Swift `enum` cases and `switch` arms are NOT extensible; those edits are unavoidable — keep them minimal and mechanical.)
+4. **Keep integration in one thin commit.** Separate "new files" commits (conflict-proof) from a single small "wire it in" commit. On rebase only that one commit can conflict, and it stays reviewable.
+5. **Don't reformat upstream files.** Format churn on lines you didn't logically change is a guaranteed conflict. Touch only what the feature needs.
+6. **Auto-generated locks** (`Tuist/Package.resolved`): never hand-merge. On conflict take upstream's and regenerate (`tuist install`).
+7. **Sync often.** Rebase the feature branch on `upstream/main` frequently — many tiny conflicts beat one big-bang merge.
+
+When reviewing your own diff, classify each touched **upstream** file as additive-safe vs landmine, and justify why each landmine couldn't be made additive.
+
 ## Sidebar performance
 
 - Per-row `SidebarItemFeature` state lives in `RepositoriesFeature.State.sidebarItems: IdentifiedArrayOf<SidebarItemFeature.State>` (see commit `0a1ed578`, "Improve sidebar performance and refresh reliability"). The whole point is that a per-leaf mutation (notification tick, agent tool storm, running-script update) invalidates only that leaf's view, not every sibling.

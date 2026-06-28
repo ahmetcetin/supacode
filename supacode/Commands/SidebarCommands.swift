@@ -111,10 +111,6 @@ private struct RevealInSidebarActionKey: FocusedValueKey {
   typealias Value = FocusedAction<Void>
 }
 
-private struct ToggleFileExplorerActionKey: FocusedValueKey {
-  typealias Value = FocusedAction<Void>
-}
-
 extension FocusedValues {
   var toggleLeftSidebarAction: FocusedAction<Void>? {
     get { self[ToggleLeftSidebarActionKey.self] }
@@ -124,10 +120,5 @@ extension FocusedValues {
   var revealInSidebarAction: FocusedAction<Void>? {
     get { self[RevealInSidebarActionKey.self] }
     set { self[RevealInSidebarActionKey.self] = newValue }
-  }
-
-  var toggleFileExplorerAction: FocusedAction<Void>? {
-    get { self[ToggleFileExplorerActionKey.self] }
-    set { self[ToggleFileExplorerActionKey.self] = newValue }
   }
 }
