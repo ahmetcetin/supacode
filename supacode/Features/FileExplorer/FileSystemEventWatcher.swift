@@ -10,7 +10,7 @@ import Foundation
 /// hops back to the main actor. The stream stops and releases on `deinit`, so a
 /// watcher's lifetime is simply tied to its owner.
 final class FileSystemEventWatcher: @unchecked Sendable {
-  private var stream: FSEventStreamRef?
+  nonisolated(unsafe) private var stream: FSEventStreamRef?
   private let queue = DispatchQueue(label: "app.supabit.supacode.file-explorer.fsevents")
   private let onChange: @Sendable () -> Void
 
